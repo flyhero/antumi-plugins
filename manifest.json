@@ -1,0 +1,19 @@
+{
+  "id": "antumi.zentao",
+  "version": "0.1.0",
+  "engines": { "antumi": ">=0.15.11 <1.0.0" },
+  "contributes": {
+    "sources": [{
+      "id": "zentao", "name": "禅道",
+      "settings": [
+        { "key": "apiBase", "type": "url", "label": "REST API 地址", "required": true, "bindsCredential": true, "placeholder": "https://zentao.example.com/api.php/v1", "hint": "填写完整的 RESTful API v1 地址，支持部署在子目录。修改地址后需要重新登录。", "translations": { "en": { "label": "REST API URL", "hint": "Full RESTful API v1 base URL, including any deployment subdirectory. Changing it signs you out." } } },
+        { "key": "kind", "type": "select", "label": "事项类型", "required": true, "default": "task", "options": [{ "value": "task", "label": "任务", "translations": { "en": { "label": "Tasks" } } }, { "value": "bug", "label": "Bug" }, { "value": "story", "label": "需求", "translations": { "en": { "label": "Stories" } } }], "translations": { "en": { "label": "Item type" } } },
+        { "key": "scopeId", "type": "text", "label": "执行 / 产品 ID", "required": true, "mono": true, "hint": "同步任务时填写执行 ID；同步 Bug 或需求时填写产品 ID。", "translations": { "en": { "label": "Execution / product ID", "hint": "Execution ID for tasks; product ID for bugs or stories." } } },
+        { "key": "assignee", "type": "text", "label": "指派给", "required": false, "default": "@me", "hint": "@me 表示自己，留空表示所有人，也可填写禅道账号。", "translations": { "en": { "label": "Assignee", "hint": "@me for yourself, empty for anyone, or a ZenTao account name." } } },
+        { "key": "state", "type": "select", "label": "状态范围", "required": true, "default": "active", "options": [{ "value": "active", "label": "未完成", "translations": { "en": { "label": "Unfinished" } } }, { "value": "all", "label": "全部", "translations": { "en": { "label": "All" } } }], "translations": { "en": { "label": "Status" } } }
+      ]
+    }]
+  },
+  "entry": { "runtime": "node", "main": "main.mjs" },
+  "env": ["ANTUMI_ZENTAO_TOKEN"]
+}
