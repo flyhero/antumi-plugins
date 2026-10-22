@@ -1,0 +1,53 @@
+{
+  "id": "antumi.jira",
+  "version": "1.0.0",
+  "engines": {
+    "antumi": ">=0.20.0-beta.2 <1.0.0"
+  },
+  "contributes": {
+    "sources": [
+      {
+        "id": "jira",
+        "name": "Jira",
+        "settings": [
+          {
+            "translations": {
+              "en": {
+                "label": "Site"
+              }
+            },
+            "key": "site",
+            "type": "url",
+            "label": "站点",
+            "placeholder": "your-team.atlassian.net",
+            "required": true,
+            "bindsCredential": true
+          },
+          {
+            "translations": {
+              "en": {
+                "label": "Filter (JQL)",
+                "hint": "The inbox syncs every 15 minutes. Defaults to unfinished issues assigned to you. Filter bugs with an issuetype condition, e.g. issuetype = Bug AND (use the type name configured in your Jira)."
+              }
+            },
+            "key": "jql",
+            "type": "textarea",
+            "label": "筛选条件（JQL）",
+            "required": true,
+            "default": "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC",
+            "mono": true,
+            "hint": "收件箱每 15 分钟按它同步一次。默认是分给你、还没完成的 issue；只看 bug 可以在前面加上 issuetype 条件，例如 issuetype = Bug AND（类型名以你们 Jira 里的为准）。"
+          }
+        ]
+      }
+    ]
+  },
+  "entry": {
+    "runtime": "node",
+    "main": "main.mjs"
+  },
+  "env": [
+    "ANTUMI_JIRA_EMAIL",
+    "ANTUMI_JIRA_TOKEN"
+  ]
+}
