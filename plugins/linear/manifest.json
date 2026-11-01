@@ -1,0 +1,18 @@
+{
+  "id": "antumi.linear",
+  "version": "0.1.0",
+  "engines": { "antumi": ">=0.15.11 <1.0.0" },
+  "contributes": {
+    "sources": [{
+      "id": "linear", "name": "Linear",
+      "settings": [
+        { "key": "team", "type": "text", "label": "团队标识", "required": false, "placeholder": "ENG", "hint": "留空同步所有可访问团队；填写团队的短标识。", "translations": { "en": { "label": "Team key", "hint": "Leave empty for all accessible teams, or enter a team key." } } },
+        { "key": "project", "type": "text", "label": "项目 ID", "required": false, "hint": "可选，填写 Linear 项目的 UUID。", "translations": { "en": { "label": "Project ID", "hint": "Optional Linear project UUID." } } },
+        { "key": "assignee", "type": "text", "label": "指派给", "required": false, "default": "@me", "hint": "@me 表示自己，留空表示所有人，也可以填写账号邮箱。", "translations": { "en": { "label": "Assignee", "hint": "@me for yourself, empty for anyone, or an email address." } } },
+        { "key": "state", "type": "select", "label": "状态范围", "required": true, "default": "active", "options": [{ "value": "active", "label": "未完成", "translations": { "en": { "label": "Unfinished" } } }, { "value": "all", "label": "全部", "translations": { "en": { "label": "All" } } }], "translations": { "en": { "label": "Status" } } }
+      ]
+    }]
+  },
+  "entry": { "runtime": "node", "main": "main.mjs" },
+  "env": ["ANTUMI_LINEAR_TOKEN"]
+}
