@@ -10,20 +10,15 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "build": "node scripts/build.mjs",
+    "build": "node ../../scripts/build.mjs zentao",
     "check": "npm run typecheck && npm test && npm run build"
   },
   "dependencies": {
-    "@antumi/plugin-sdk": "file:vendor/antumi-plugin-sdk-0.1.0.tgz",
+    "@antumi/plugin-sdk": "file:../../vendor/antumi-plugin-sdk-0.1.0.tgz",
     "turndown": "7.2.0",
     "zod": "4.6.5"
   },
   "devDependencies": {
-    "@types/node": "26.6.2",
-    "@types/turndown": "5.0.6",
-    "esbuild": "0.28.2",
-    "fflate": "0.8.2",
-    "typescript": "7.0.2",
-    "vitest": "5.0.1"
+    "@types/turndown": "5.0.6"
   }
 }

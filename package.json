@@ -1,0 +1,26 @@
+{
+  "name": "antumi-plugins",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "workspaces": [
+    "plugins/*"
+  ],
+  "scripts": {
+    "typecheck": "npm run typecheck --workspaces",
+    "test": "node --test scripts/*.test.mjs && npm test --workspaces",
+    "build": "npm run build --workspaces",
+    "check": "npm run typecheck && npm test && npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.2",
+    "esbuild": "0.28.2",
+    "fflate": "0.8.2",
+    "typescript": "7.0.2",
+    "vitest": "5.0.1",
+    "@antumi/plugin-sdk": "file:vendor/antumi-plugin-sdk-0.1.1.tgz"
+  }
+}

@@ -1,6 +1,6 @@
 # Antumi GitHub 插件
 
-独立的 Antumi 任务来源插件，使用 Antumi Plugin SDK。源码、测试、构建和 CI 均在这个仓库，不依赖 Antumi 源码或兄弟仓库。
+独立的 Antumi 任务来源插件，使用 Antumi Plugin SDK。源码和测试在本目录，构建与 CI 由 antumi-plugins 仓库统一维护，不依赖 Antumi 源码。
 
 ## 使用
 
@@ -21,11 +21,12 @@ Antumi 只保存本仓库的推荐信息，用户点击安装时从 GitHub Relea
 
 ## 独立开发
 
-要求 Node >=22.13。仓库带有 SDK 包 `vendor/antumi-plugin-sdk-0.1.0.tgz`，无需等待 SDK 首次发布到 npm：
+要求 Node >=22.13。仓库带有 SDK 包 `../../vendor/antumi-plugin-sdk-0.1.0.tgz`，无需等待 SDK 首次发布到 npm：
 
 ```sh
+# 在仓库根目录安装
 npm ci
-npm run check
+npm run check --workspace antumi-plugin-github
 ```
 
 `check` 执行类型检查、带模拟 API 的测试和构建。产物为：
@@ -44,8 +45,6 @@ ZIP 使用固定时间戳；相同源码与依赖重复构建时校验值保持�
 
 ## GitHub 分发
 
-插件单独发布到本仓库的 GitHub Releases，Antumi 只保存推荐条目；点击安装时才下载最新正式 Release 的 ZIP。仓库中不提交 `dist/` 或 `node_modules/`。
+在 [flyhero/antumi-plugins](https://github.com/flyhero/antumi-plugins) 中独立发布，标签格式为 `github-vX.Y.Z`。构建产物仍是 `dist/antumi-plugin-github-X.Y.Z.zip`，插件 ID、来源 ID、凭据和配置格式不变。
 
-普通提交和 PR 的 CI 只检查并上传构建产物。推送与 package.json、manifest.json 版本一致的 `vX.Y.Z` 标签后，Release 工作流先运行 `npm ci` 和完整检查，再创建 Release 并上传带版本号的 ZIP；带 `-` 的版本标为预发布，不会成为推荐安装使用的 Latest。已有 Release 不覆盖。
-
-当前 Antumi 安装器读取公开 Release。仅创建仓库或提交源码还不能安装，Release 必须包含一个插件 ZIP。设置 → 插件可以检查更新、停用、卸载或切换到保留版本；凭据、筛选和导入任务由 Antumi 保留。
+构建、发布与历史导入说明见 [仓库说明](../../README.md)。旧版 Antumi 可在安装时指定 Release 标签及 ZIP 文件；新版宿主支持按插件标签前缀检查更新。
