@@ -1,4 +1,6 @@
 import { z } from 'zod'
+import { commentState, commentPage, SourceComment, type SourceCommentState, type SourceCommentOptions, type SourceCommentPage } from '@antumi/plugin-sdk'
+import { adfToMarkdown } from './jira-adf.js'
 import { ISSUE_STATUS_CATEGORIES, type SourceIssue } from '@antumi/plugin-sdk'
 import { SourceError } from '@antumi/plugin-sdk'
 
@@ -7,6 +9,7 @@ export type JiraCredentials = { site: string; email: string; token: string }
 export type JiraComment = { author: string; created: number | null; body: unknown }
 export type JiraAttachment = { id: string; filename: string; mimeType: string; size: number }
 export type JiraIssue = SourceIssue & {
+  commentState?: SourceCommentState
   description: unknown
   // The latest comments, oldest first; `commentTotal` says how many the issue has in all.
   comments: JiraComment[]
@@ -15,6 +18,7 @@ export type JiraIssue = SourceIssue & {
 }
 
 export type JiraApi = {
+  commentChanges?(key: string, signal: AbortSignal, options: SourceCommentOptions): Promise<SourceCommentPage>
   myself(signal: AbortSignal): Promise<{ displayName: string }>
   search(jql: string, signal: AbortSignal): Promise<SourceIssue[]>
   issue(key: string, signal: AbortSignal): Promise<JiraIssue>
@@ -84,6 +88,7 @@ const IssueDetail = IssueRow.extend({
 const CommentPage = z.object({
   comments: z.array(
     z.object({
+      id: z.string().optional(), updated: z.string().nullish(), self: z.string().optional(),
       author: z.object({ displayName: z.string() }).nullish(),
       created: z.string().nullish(),
       body: z.unknown()
@@ -236,8 +241,15 @@ export class JiraClient implements JiraApi {
     // The issue's own comment field is not guaranteed to hold the newest ones; this endpoint is.
     const query = new URLSearchParams({ orderBy: '-created', maxResults: String(COMMENT_LIMIT) })
     const page = parse(CommentPage, await this.get(`${path}/comment?${query}`, signal))
+    const structured = page.comments.map((comment) => SourceComment.safeParse(this.structuredComment(comment, key)))
+    let state = structured.every((value) => value.success) ? commentState(structured.flatMap((value) => value.data ? [value.data] : [])) : undefined
+    if (state && page.comments.length === COMMENT_LIMIT && page.comments.every((comment) => time(comment.created) === state?.checkpoint.createdAt)) {
+      const complete = await this.commentChanges(key, signal, { checkpoint: { createdAt: state.checkpoint.createdAt, ids: [] }, continuation: null })
+      state = { ...state, checkpoint: complete.checkpoint }
+    }
     return {
       ...summary,
+      ...(state ? { commentState: state } : {}),
       description: row.fields.description,
       comments: page.comments
         .map((comment) => ({ author: comment.author?.displayName ?? '', created: time(comment.created), body: comment.body }))
@@ -245,6 +257,25 @@ export class JiraClient implements JiraApi {
       commentTotal: page.total ?? page.comments.length,
       attachments: row.fields.attachment ?? []
     }
+  }
+
+  private structuredComment(comment: z.infer<typeof CommentPage>['comments'][number], key: string) {
+    const markdown = adfToMarkdown(comment.body)
+    return { id: comment.id ?? '', author: comment.author?.displayName ?? '', createdAt: time(comment.created), updatedAt: time(comment.updated),
+      url: `${this.credentials.site}/browse/${encodeURIComponent(key)}${comment.id ? `?focusedCommentId=${encodeURIComponent(comment.id)}` : ''}`, markdown: markdown.slice(0, 50_000), truncated: markdown.length > 50_000 }
+  }
+
+  async commentChanges(key: string, signal: AbortSignal, options: SourceCommentOptions): Promise<SourceCommentPage> {
+    if (!JIRA_KEY_PATTERN.test(key)) throw new SourceError('not-found', 'Invalid Jira issue key')
+    const comments: SourceComment[] = []
+    for (let startAt = 0; ; startAt += 100) {
+      const query = new URLSearchParams({ orderBy: '-created', maxResults: '100', startAt: String(startAt) })
+      const page = parse(CommentPage, await this.get(`/rest/api/3/issue/${encodeURIComponent(key)}/comment?${query}`, signal))
+      for (const comment of page.comments) comments.push(SourceComment.parse(this.structuredComment(comment, key)))
+      if (page.comments.length < 100 || (page.total != null && startAt + page.comments.length >= page.total) || page.comments.some((comment) => (time(comment.created) ?? Infinity) < options.checkpoint.createdAt)) break
+      if (startAt >= 100_000) throw new SourceError('response-too-large', 'Comment history is too large')
+    }
+    return commentPage(comments, options)
   }
 
   // Straight from the site, never through a redirect: the token must not follow one elsewhere.

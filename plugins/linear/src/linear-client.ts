@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { commentState, commentPage, SourceComment, type SourceCommentOptions, type SourceCommentPage } from '@antumi/plugin-sdk'
 import { MAX_ISSUE_TITLE_LENGTH, MAX_SNAPSHOT_LENGTH, SourceError, type SourceIssue, type SourceIssueDetail, type SourceSettings } from '@antumi/plugin-sdk'
 
 const ENDPOINT = 'https://api.linear.app/graphql'
@@ -13,9 +14,10 @@ const Page = z.object({
   issues: z.object({ nodes: z.array(Row), pageInfo: z.object({ hasNextPage: z.boolean(), endCursor: z.string().nullable() }) })
 })
 const Viewer = z.object({ viewer: z.object({ id: z.string(), name: z.string(), email: z.string() }) })
+const CommentRow = z.object({ id: z.string().optional(), body: z.string(), createdAt: z.string(), updatedAt: z.string().optional(), url: z.string().optional(), user: Person.nullable() })
 const Detail = z.object({ issue: Row.extend({
   description: z.string().nullable(), creator: Person.nullable(), assignee: Person.nullable(),
-  comments: z.object({ nodes: z.array(z.object({ body: z.string(), createdAt: z.string(), user: Person.nullable() })) })
+  comments: z.object({ nodes: z.array(CommentRow) })
 }).nullable() })
 const Envelope = z.object({
   data: z.unknown().optional(),
@@ -33,7 +35,7 @@ export const DETAIL_QUERY = `query AntumiIssue($id: String!) {
   issue(id: $id) {
     ${ISSUE_FIELDS}
     description creator { name } assignee { name }
-    comments(first: 20, orderBy: createdAt) { nodes { body createdAt user { name } } }
+    comments(first: 20, orderBy: createdAt) { nodes { id body createdAt updatedAt url user { name } } }
   }
 }`
 
@@ -96,7 +98,38 @@ export class LinearClient {
     const metadata = [`# ${issue.identifier} ${issue.title}`, `状态：${issue.state.name}`, `创建人：${issue.creator?.name ?? ''}`, `指派给：${issue.assignee?.name ?? ''}`, `标签：${issue.labels.nodes.map((label) => label.name).join('、')}`]
     const comments = [...issue.comments.nodes].sort((a, b) => (time(a.createdAt) ?? 0) - (time(b.createdAt) ?? 0))
     const markdown = [...metadata, '', issue.description ?? '', '', '## 最近评论（最多 20 条）', ...comments.map((comment) => `### ${comment.user?.name ?? 'Unknown'} · ${comment.createdAt}\n\n${comment.body}`)].join('\n\n')
-    return { ...summarize(issue), markdown: markdown.slice(0, MAX_SNAPSHOT_LENGTH) }
+    const structured = issue.comments.nodes.map((comment) => SourceComment.safeParse(this.structuredComment(comment, issue.url)))
+    let state = structured.every((value) => value.success) ? commentState(structured.flatMap((value) => value.data ? [value.data] : [])) : undefined
+    if (state && issue.comments.nodes.length === 20 && issue.comments.nodes.every((comment) => time(comment.createdAt) === state?.checkpoint.createdAt)) {
+      const complete = await this.commentChanges(key, signal, { checkpoint: { createdAt: state.checkpoint.createdAt, ids: [] }, continuation: null })
+      state = { ...state, checkpoint: complete.checkpoint }
+    }
+    return { ...summarize(issue), markdown: markdown.slice(0, MAX_SNAPSHOT_LENGTH), ...(state ? { commentState: state } : {}) }
+  }
+
+  private structuredComment(comment: z.infer<typeof CommentRow>, url: string) {
+    return { id: comment.id ?? '', author: comment.user?.name ?? '', createdAt: time(comment.createdAt), updatedAt: comment.updatedAt ? time(comment.updatedAt) : null,
+      url: comment.url ?? url, markdown: comment.body.slice(0, 50_000), truncated: comment.body.length > 50_000 }
+  }
+
+  async commentChanges(key: string, signal: AbortSignal, options: SourceCommentOptions): Promise<SourceCommentPage> {
+    const schema = z.object({ issue: z.object({ identifier: z.string(), url: z.string(), comments: z.object({ nodes: z.array(CommentRow), pageInfo: z.object({ hasNextPage: z.boolean(), endCursor: z.string().nullable() }) }) }).nullable() })
+    const query = `query AntumiComments($id: String!, $after: String) { issue(id: $id) { identifier url comments(first: 100, after: $after, orderBy: createdAt) { nodes { id body createdAt updatedAt url user { name } } pageInfo { hasNextPage endCursor } } } }`
+    const comments: SourceComment[] = []
+    let after: string | null = null
+    const seen = new Set<string>()
+    for (;;) {
+      const data: z.infer<typeof schema> = parse(schema, await this.query(query, { id: key, after }, signal))
+      if (!data.issue || data.issue.identifier.toUpperCase() !== key.toUpperCase()) throw new SourceError('not-found', 'Linear issue not found')
+      const page = data.issue.comments
+      for (const comment of page.nodes) comments.push(SourceComment.parse(this.structuredComment(comment, data.issue.url)))
+      if (!page.pageInfo.hasNextPage || page.nodes.some((comment) => (time(comment.createdAt) ?? Infinity) < options.checkpoint.createdAt)) break
+      const next = page.pageInfo.endCursor
+      if (!next || seen.has(next) || !page.nodes.length || seen.size >= 1000) throw new SourceError('request-failed', 'Invalid Linear comment pagination')
+      seen.add(next)
+      after = next
+    }
+    return commentPage(comments, options)
   }
 
   private async query(query: string, variables: Record<string, unknown>, signal: AbortSignal): Promise<unknown> {

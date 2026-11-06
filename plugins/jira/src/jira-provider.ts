@@ -128,6 +128,11 @@ export function jiraProvider(connect: (credentials: JiraCredentials) => JiraApi 
       }
     },
 
+    comments: (settings, credential, key, signal, options) => {
+      const api = client(jiraCredentials(settings, credential))
+      if (!api.commentChanges) throw new SourceError('request-failed', 'Comment sync is unavailable')
+      return api.commentChanges(key, signal, options)
+    },
     list: (settings, credential, signal) => client(jiraCredentials(settings, credential)).search(settings.jql ?? DEFAULT_JIRA_JQL, signal),
 
     // The raw fields ride along; core keeps only what the issue schema names. Asked for the text

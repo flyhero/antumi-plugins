@@ -7,7 +7,7 @@
   "contributes": {
     "sources": [
       {
-        "id": "jira",
+        "id": "jira", "commentSync": 1,
         "name": "Jira",
         "settings": [
           {

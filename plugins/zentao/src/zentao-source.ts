@@ -55,6 +55,11 @@ export function zentaoSource(connect = (base: string, key: string) => new Zentao
       }
       throw new SourceError('auth-failed', '禅道登录失败')
     },
+    comments(settings, credential, key, signal, options) {
+      const match = /^(task|bug|story)-([1-9][0-9]*)$/.exec(key)
+      if (!match) throw new SourceError('not-found', '无效的禅道事项编号')
+      return connect(normalizeApiBase(settings.apiBase ?? ''), token(credential)).commentChanges(kind(match[1]), match[2] ?? '', signal, options)
+    },
     list: (settings, credential, signal) => connect(normalizeApiBase(settings.apiBase ?? ''), token(credential)).list(kind(settings.kind), settings, signal),
     fetch(settings, credential, key, signal) {
       const match = /^(task|bug|story)-([1-9][0-9]*)$/.exec(key)

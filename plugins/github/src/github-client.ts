@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { commentState, commentPage, SourceComment, type SourceCommentState, type SourceCommentOptions, type SourceCommentPage } from '@antumi/plugin-sdk'
 import { MAX_ISSUE_TITLE_LENGTH, type SourceIssue } from '@antumi/plugin-sdk'
 import { SourceError } from './source-error.js'
 
@@ -7,6 +8,7 @@ export const GITHUB_KEY_PATTERN = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)#([1-9][
 export type GitHubCredentials = { token: string }
 export type GitHubComment = { author: string; created: number | null; body: string }
 export type GitHubIssue = SourceIssue & {
+  commentState?: SourceCommentState
   repository: string
   author: string
   body: string
@@ -16,6 +18,7 @@ export type GitHubIssue = SourceIssue & {
 }
 
 export type GitHubApi = {
+  commentChanges?(key: string, signal: AbortSignal, options: SourceCommentOptions): Promise<SourceCommentPage>
   myself(signal: AbortSignal): Promise<{ login: string }>
   search(query: string, signal: AbortSignal): Promise<SourceIssue[]>
   issue(key: string, signal: AbortSignal): Promise<GitHubIssue>
@@ -53,6 +56,7 @@ const IssueRow = z.object({
 })
 const SearchPage = z.object({ items: z.array(IssueRow) })
 const Comment = z.object({
+  id: z.union([z.number().int(), z.string()]).optional(), updated_at: z.string().nullish(), html_url: z.string().optional(),
   body: z.string().nullish(),
   user: User.nullish(),
   created_at: z.string().nullish()
@@ -218,10 +222,14 @@ export class GitHubClient implements GitHubApi {
     if (!summary || summary.key !== key) {
       throw new SourceError('request-failed', 'GitHub answered with a mismatched issue')
     }
-    const comments = (await this.comments(path, row.comments ?? 0, signal))
+    const rawComments = await this.comments(path, row.comments ?? 0, signal)
+    const structured = rawComments.map((comment) => SourceComment.safeParse({ id: comment.id === undefined ? '' : String(comment.id), author: comment.user?.login ?? '', createdAt: time(comment.created_at), updatedAt: time(comment.updated_at), url: comment.html_url ?? summary.url, markdown: (comment.body ?? '').slice(0, 50_000), truncated: (comment.body?.length ?? 0) > 50_000 }))
+    const state = structured.every((value) => value.success) ? commentState(structured.flatMap((value) => value.data ? [value.data] : [])) : undefined
+    const comments = rawComments.slice(-20)
       .map((comment) => ({ author: comment.user?.login ?? '', created: time(comment.created_at), body: comment.body ?? '' }))
     return {
       ...summary,
+      ...(state ? { commentState: state } : {}),
       repository,
       author: row.user?.login ?? '',
       body: row.body ?? '',
@@ -229,6 +237,21 @@ export class GitHubClient implements GitHubApi {
       comments,
       commentTotal: row.comments ?? comments.length
     }
+  }
+
+  async commentChanges(key: string, signal: AbortSignal, options: SourceCommentOptions): Promise<SourceCommentPage> {
+    const match = GITHUB_KEY_PATTERN.exec(key)
+    if (!match) throw new SourceError('not-found', 'Invalid GitHub issue key')
+    const path = `/repos/${encodeURIComponent(match[1] ?? '')}/${encodeURIComponent(match[2] ?? '')}/issues/${match[3]}`
+    const row = parse(IssueRow, await this.get(path, signal))
+    const comments: SourceComment[] = []
+    for (let page = Math.max(1, Math.ceil((row.comments ?? 0) / COMMENT_PAGE_SIZE)); page >= 1; page--) {
+      const rows = parse(z.array(Comment), await this.get(`${path}/comments?${new URLSearchParams({ per_page: String(COMMENT_PAGE_SIZE), page: String(page) })}`, signal))
+      for (const comment of rows) comments.push(SourceComment.parse({ id: comment.id === undefined ? '' : String(comment.id), author: comment.user?.login ?? '', createdAt: time(comment.created_at), updatedAt: time(comment.updated_at), url: comment.html_url ?? row.html_url, markdown: (comment.body ?? '').slice(0, 50_000), truncated: (comment.body?.length ?? 0) > 50_000 }))
+      if (rows.some((comment) => (time(comment.created_at) ?? Infinity) < options.checkpoint.createdAt)) break
+      if (page > 1000) throw new SourceError('response-too-large', 'Comment history is too large')
+    }
+    return commentPage(comments, options)
   }
 
   private async get(pathAndQuery: string, signal: AbortSignal): Promise<unknown> {
@@ -260,6 +283,15 @@ export class GitHubClient implements GitHubApi {
     }
     const latest = await fetchPage(page)
     const previous = latest.length < COMMENT_LIMIT && page > 1 ? await fetchPage(page - 1) : []
-    return [...previous, ...latest].slice(-COMMENT_LIMIT)
+    const combined = [...previous, ...latest]
+    const newest = combined.at(-1)?.created_at
+    if (combined.length >= COMMENT_LIMIT && newest && combined.every((comment) => comment.created_at === newest)) {
+      for (let earlier = page - (previous.length ? 2 : 1); earlier >= 1; earlier--) {
+        const rows = await fetchPage(earlier)
+        combined.unshift(...rows)
+        if (rows.some((comment) => comment.created_at !== newest)) break
+      }
+    }
+    return combined
   }
 }

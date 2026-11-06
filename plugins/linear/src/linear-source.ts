@@ -48,6 +48,7 @@ export function linearSource(connect = (key: string) => new LinearClient(key)): 
       }
       throw new SourceError('auth-failed', 'Linear 登录失败')
     },
+    comments: (_settings, credential, key, signal, options) => connect(token(credential)).commentChanges(key, signal, options),
     list: (settings, credential, signal) => connect(token(credential)).list(settings, signal),
     fetch: (settings, credential, key, signal) => {
       const normalized = key.trim().toUpperCase()

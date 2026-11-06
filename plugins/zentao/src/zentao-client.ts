@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { commentState, commentPage, SourceComment, type SourceCommentOptions, type SourceCommentPage } from '@antumi/plugin-sdk'
 import TurndownService from 'turndown'
 import { MAX_ISSUE_TITLE_LENGTH, MAX_SNAPSHOT_LENGTH, SourceError, type SourceIssue, type SourceIssueDetail, type SourceSettings } from '@antumi/plugin-sdk'
 
@@ -12,8 +13,8 @@ const Row = z.object({
   desc: z.string().nullish(), steps: z.string().nullish(), spec: z.string().nullish(), verify: z.string().nullish(),
   deleted: z.union([z.boolean(), z.number(), z.string()]).optional(),
   actions: z.union([
-    z.array(z.object({ comment: z.string().nullish(), actor: Account, date: z.string().nullish() })),
-    z.record(z.string(), z.object({ comment: z.string().nullish(), actor: Account, date: z.string().nullish() }))
+    z.array(z.object({ id: Id.optional(), comment: z.string().nullish(), actor: Account, date: z.string().nullish() })),
+    z.record(z.string(), z.object({ id: Id.optional(), comment: z.string().nullish(), actor: Account, date: z.string().nullish() }))
   ]).optional()
 })
 const Page = z.object({
@@ -107,7 +108,30 @@ export class ZentaoClient {
       ...(row.verify ? ['## 验收标准', markdown.turndown(row.verify)] : []),
       ...(comments.length ? ['## 最近评论', ...comments.map((action) => `### ${account(action.actor)} · ${action.date ?? ''}\n\n${markdown.turndown(action.comment ?? '')}`)] : [])
     ].join('\n\n')
-    return { ...issue, markdown: text.slice(0, MAX_SNAPSHOT_LENGTH) }
+    const structured = this.commentsOf(row, issue.url)
+    return { ...issue, markdown: text.slice(0, MAX_SNAPSHOT_LENGTH), ...(structured ? { commentState: commentState(structured) } : {}) }
+  }
+
+  private commentsOf(row: z.infer<typeof Row>, url: string): SourceComment[] | null {
+    const actions = Array.isArray(row.actions) ? row.actions.map((action) => [action.id, action] as const) : Object.entries(row.actions ?? {})
+    const comments: SourceComment[] = []
+    for (const [identity, action] of actions) {
+      if (!action.comment?.trim()) continue
+      const body = markdown.turndown(action.comment)
+      const parsed = SourceComment.safeParse({ id: action.id ?? identity ?? '', author: account(action.actor), createdAt: time(action.date), updatedAt: null,
+        url, markdown: body.slice(0, 50_000), truncated: body.length > 50_000 })
+      if (!parsed.success) return null
+      comments.push(parsed.data)
+    }
+    return comments
+  }
+
+  async commentChanges(kind: ItemKind, id: string, signal: AbortSignal, options: SourceCommentOptions): Promise<SourceCommentPage> {
+    const row = parse(Row, await this.get(`/${plural[kind]}/${id}`, signal))
+    if (row.id !== id) throw new SourceError('request-failed', '禅道返回的事项编号不匹配')
+    const comments = this.commentsOf(row, summary(kind, row, this.base).url)
+    if (!comments) throw new SourceError('request-failed', '禅道没有返回稳定的评论标识，只能更新原文快照')
+    return commentPage(comments, options)
   }
 
   private async get(path: string, signal: AbortSignal): Promise<unknown> {

@@ -4,7 +4,7 @@
   "engines": { "antumi": ">=0.15.11 <1.0.0" },
   "contributes": {
     "sources": [{
-      "id": "linear", "name": "Linear",
+      "id": "linear", "commentSync": 1, "name": "Linear",
       "settings": [
         { "key": "team", "type": "text", "label": "团队标识", "required": false, "placeholder": "ENG", "hint": "留空同步所有可访问团队；填写团队的短标识。", "translations": { "en": { "label": "Team key", "hint": "Leave empty for all accessible teams, or enter a team key." } } },
         { "key": "project", "type": "text", "label": "项目 ID", "required": false, "hint": "可选，填写 Linear 项目的 UUID。", "translations": { "en": { "label": "Project ID", "hint": "Optional Linear project UUID." } } },

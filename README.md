@@ -53,3 +53,9 @@ Release 工作流先执行完整检查，再验证标签与目标插件版本一
 - 禅道：8fedb532e6bcb951e04d25c3d5fb2045192b9028
 
 许可证：Apache-2.0。
+
+## New comment synchronization
+
+The four official sources use SDK 0.1.3 and declare `commentSync: 1`. Antumi can watch imported tasks and investigation conversations, poll new comments every 15 minutes, and let the user send the new comments to the existing conversation. No Agent runs just because a comment arrives. GitHub supports ordinary Issue/PR discussion comments, not inline review comments. ZenTao requires native action IDs or an action map with stable keys; installations without them keep Markdown snapshots but cannot reliably report new comments.
+
+The initial snapshot keeps the latest twenty comments while its checkpoint covers all identities at the newest timestamp. Incremental requests paginate beyond twenty, include the time boundary, and preserve comment IDs. Credentials and stderr handling follow the existing plugin contract.

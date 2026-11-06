@@ -62,6 +62,11 @@ export function githubProvider(connect: (credentials: GitHubCredentials) => GitH
       }
     },
 
+    comments: (settings, credential, key, signal, options) => {
+      const api = client(githubCredentials(credential))
+      if (!api.commentChanges) throw new SourceError('request-failed', 'Comment sync is unavailable')
+      return api.commentChanges(key, signal, options)
+    },
     list: (settings, credential, signal) => client(githubCredentials(credential)).search(settings.query ?? DEFAULT_GITHUB_QUERY, signal),
 
     async fetch(_settings, credential, key, signal) {
