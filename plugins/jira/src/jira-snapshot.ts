@@ -20,13 +20,14 @@ function formatSize(bytes: number): string {
 }
 
 // What happened to each image attachment: shown under the snapshot, too big or too many to
-// fetch, or failed on the way.
-export type ImageOutcome = 'saved' | 'skipped' | 'failed'
+// fetch, failed on the way, or left for Antumi to fetch apart from the text.
+export type ImageOutcome = 'saved' | 'skipped' | 'failed' | 'deferred'
 
 const IMAGE_NOTE: Record<ImageOutcome, string> = {
   saved: '图片见下方',
   skipped: '图片太大或太多，没有下载',
-  failed: '图片没能下载'
+  failed: '图片没能下载',
+  deferred: '图片稍后单独发送'
 }
 
 export function isImageAttachment(file: Pick<JiraAttachment, 'mimeType' | 'filename'>): boolean {

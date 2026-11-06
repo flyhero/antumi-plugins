@@ -110,4 +110,24 @@ describe('jiraProvider images', () => {
     expect(detail.markdown).toContain('- denied.jpg（1 KB，图片没能下载）')
     expect(detail.markdown).toContain('- spec.pdf（1 KB）')
   })
+
+  it('leaves the images for later when asked for the text alone, saying how many', async () => {
+    const downloaded: string[] = []
+    const provider = jiraProvider(() => ({
+      myself: async () => ({ displayName: 'x' }),
+      search: async () => [],
+      issue: async () => issue,
+      download: async (id) => {
+        downloaded.push(id)
+        return new Uint8Array([1])
+      }
+    }))
+    const detail = await provider.fetch(settings, { kind: 'basic', payload: { email: 'e', token: 't' } }, 'PROJ-9', signal, { images: false })
+    expect(downloaded).toEqual([])
+    expect(detail.images).toEqual([])
+    expect(detail.imagesDeferred).toBe(2)
+    expect(detail.markdown).toContain('- shot.png（1 KB，图片稍后单独发送）')
+    expect(detail.markdown).toContain('- huge.png（11.0 MB，图片太大或太多，没有下载）')
+    expect(detail.markdown).toContain('- denied.jpg（1 KB，图片稍后单独发送）')
+  })
 })

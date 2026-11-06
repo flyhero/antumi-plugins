@@ -21,8 +21,8 @@ async function inBatches<T>(items: readonly T[], size: number, run: (item: T) =>
   }
 }
 
-// Which image attachments to fetch, in the issue's order, and what became of each.
-async function downloadImages(api: JiraApi, issue: JiraIssue, signal: AbortSignal) {
+// Which image attachments to fetch, in the issue's order, within the limits.
+function wantedImages(issue: JiraIssue): { wanted: JiraAttachment[]; outcomes: Map<string, ImageOutcome> } {
   const outcomes = new Map<string, ImageOutcome>()
   const wanted: JiraAttachment[] = []
   let budget = IMAGE_TOTAL_BYTES
@@ -34,6 +34,12 @@ async function downloadImages(api: JiraApi, issue: JiraIssue, signal: AbortSigna
       budget -= file.size
     }
   }
+  return { wanted, outcomes }
+}
+
+// Fetches the wanted images and says what became of each.
+async function downloadImages(api: JiraApi, issue: JiraIssue, signal: AbortSignal) {
+  const { wanted, outcomes } = wantedImages(issue)
   const fetched = new Map<string, Uint8Array>()
   await inBatches(wanted, IMAGE_CONCURRENCY, async (file) => {
     try {
@@ -124,10 +130,16 @@ export function jiraProvider(connect: (credentials: JiraCredentials) => JiraApi 
 
     list: (settings, credential, signal) => client(jiraCredentials(settings, credential)).search(settings.jql ?? DEFAULT_JIRA_JQL, signal),
 
-    // The raw fields ride along; core keeps only what the issue schema names.
-    async fetch(settings, credential, key, signal) {
+    // The raw fields ride along; core keeps only what the issue schema names. Asked for the text
+    // alone, it downloads no image and counts the ones a later fetch will bring.
+    async fetch(settings, credential, key, signal, options) {
       const api = client(jiraCredentials(settings, credential))
       const issue = await api.issue(key, signal)
+      if (options?.images === false) {
+        const { wanted, outcomes } = wantedImages(issue)
+        for (const file of wanted) outcomes.set(file.id, 'deferred')
+        return { ...issue, markdown: issueSnapshot(issue, outcomes), images: [], imagesDeferred: wanted.length }
+      }
       const { images, outcomes } = await downloadImages(api, issue, signal)
       return { ...issue, markdown: issueSnapshot(issue, outcomes), images }
     }
