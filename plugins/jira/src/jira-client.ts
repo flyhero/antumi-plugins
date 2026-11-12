@@ -1,7 +1,8 @@
 import { z } from 'zod'
 import { commentState, commentPage, SourceComment, type SourceCommentState, type SourceCommentOptions, type SourceCommentPage } from '@antumi/plugin-sdk'
-import { adfToMarkdown } from './jira-adf.js'
-import { ISSUE_STATUS_CATEGORIES, type SourceIssue } from '@antumi/plugin-sdk'
+import { adfToMarkdown, escapeLinkText } from './jira-adf.js'
+import { isImageAttachment } from './jira-snapshot.js'
+import { ISSUE_STATUS_CATEGORIES, MAX_TASK_IMAGES, type SourceIssue } from '@antumi/plugin-sdk'
 import { SourceError } from '@antumi/plugin-sdk'
 
 export type JiraCredentials = { site: string; email: string; token: string }
@@ -70,21 +71,23 @@ const SearchPage = z.object({
   nextPageToken: z.string().nullish(),
   isLast: z.boolean().nullish()
 })
+const Attachments = z
+  .array(
+    z.object({
+      id: z.union([z.string(), z.number()]).transform(String),
+      filename: z.string(),
+      mimeType: z.string().catch(''),
+      size: z.number().catch(0)
+    })
+  )
+  .nullish()
 const IssueDetail = IssueRow.extend({
   fields: SummaryFields.extend({
     description: z.unknown(),
-    attachment: z
-      .array(
-        z.object({
-          id: z.union([z.string(), z.number()]).transform(String),
-          filename: z.string(),
-          mimeType: z.string().catch(''),
-          size: z.number().catch(0)
-        })
-      )
-      .nullish()
+    attachment: Attachments
   })
 })
+const AttachmentFields = z.object({ fields: z.object({ attachment: Attachments }) })
 const CommentPage = z.object({
   comments: z.array(
     z.object({
@@ -241,7 +244,8 @@ export class JiraClient implements JiraApi {
     // The issue's own comment field is not guaranteed to hold the newest ones; this endpoint is.
     const query = new URLSearchParams({ orderBy: '-created', maxResults: String(COMMENT_LIMIT) })
     const page = parse(CommentPage, await this.get(`${path}/comment?${query}`, signal))
-    const structured = page.comments.map((comment) => SourceComment.safeParse(this.structuredComment(comment, key)))
+    const attachments = row.fields.attachment ?? []
+    const structured = page.comments.map((comment) => SourceComment.safeParse(this.structuredComment(comment, key, attachments)))
     let state = structured.every((value) => value.success) ? commentState(structured.flatMap((value) => value.data ? [value.data] : [])) : undefined
     if (state && page.comments.length === COMMENT_LIMIT && page.comments.every((comment) => time(comment.created) === state?.checkpoint.createdAt)) {
       const complete = await this.commentChanges(key, signal, { checkpoint: { createdAt: state.checkpoint.createdAt, ids: [] }, continuation: null })
@@ -259,22 +263,41 @@ export class JiraClient implements JiraApi {
     }
   }
 
-  private structuredComment(comment: z.infer<typeof CommentPage>['comments'][number], key: string) {
-    const markdown = adfToMarkdown(comment.body)
+  // An image pasted into a comment is an attachment of the issue, found by its file name as in the
+  // description; the comment lists it by attachment id for Antumi to fetch when it is sent on.
+  private structuredComment(comment: z.infer<typeof CommentPage>['comments'][number], key: string, attachments: readonly JiraAttachment[]) {
+    const images: { id: string; name: string }[] = []
+    const markdown = adfToMarkdown(comment.body, { describeMedia: (name) => {
+      const file = attachments.find((attachment) => attachment.filename === name)
+      const label = escapeLinkText(name ?? '文件')
+      if (!file || !isImageAttachment(file)) return `（附件：${label}）`
+      if (images.length < MAX_TASK_IMAGES && !images.some((image) => image.id === file.id)) images.push({ id: file.id, name: file.filename })
+      return `（图片：${label}）`
+    } })
     return { id: comment.id ?? '', author: comment.author?.displayName ?? '', createdAt: time(comment.created), updatedAt: time(comment.updated),
-      url: `${this.credentials.site}/browse/${encodeURIComponent(key)}${comment.id ? `?focusedCommentId=${encodeURIComponent(comment.id)}` : ''}`, markdown: markdown.slice(0, 50_000), truncated: markdown.length > 50_000 }
+      url: `${this.credentials.site}/browse/${encodeURIComponent(key)}${comment.id ? `?focusedCommentId=${encodeURIComponent(comment.id)}` : ''}`, markdown: markdown.slice(0, 50_000), truncated: markdown.length > 50_000,
+      ...(images.length ? { images } : {}) }
+  }
+
+  // The issue's attachments, asked for only when a comment holds a file to match against them.
+  private async attachments(key: string, raw: readonly z.infer<typeof CommentPage>['comments'][number][], signal: AbortSignal): Promise<JiraAttachment[]> {
+    if (!raw.some((comment) => JSON.stringify(comment.body ?? null).includes('"media'))) return []
+    const query = new URLSearchParams({ fields: 'attachment' })
+    return parse(AttachmentFields, await this.get(`/rest/api/3/issue/${encodeURIComponent(key)}?${query}`, signal)).fields.attachment ?? []
   }
 
   async commentChanges(key: string, signal: AbortSignal, options: SourceCommentOptions): Promise<SourceCommentPage> {
     if (!JIRA_KEY_PATTERN.test(key)) throw new SourceError('not-found', 'Invalid Jira issue key')
-    const comments: SourceComment[] = []
+    const raw: z.infer<typeof CommentPage>['comments'] = []
     for (let startAt = 0; ; startAt += 100) {
       const query = new URLSearchParams({ orderBy: '-created', maxResults: '100', startAt: String(startAt) })
       const page = parse(CommentPage, await this.get(`/rest/api/3/issue/${encodeURIComponent(key)}/comment?${query}`, signal))
-      for (const comment of page.comments) comments.push(SourceComment.parse(this.structuredComment(comment, key)))
+      raw.push(...page.comments)
       if (page.comments.length < 100 || (page.total != null && startAt + page.comments.length >= page.total) || page.comments.some((comment) => (time(comment.created) ?? Infinity) < options.checkpoint.createdAt)) break
       if (startAt >= 100_000) throw new SourceError('response-too-large', 'Comment history is too large')
     }
+    const attachments = await this.attachments(key, raw, signal)
+    const comments = raw.map((comment) => SourceComment.parse(this.structuredComment(comment, key, attachments)))
     return commentPage(comments, options)
   }
 

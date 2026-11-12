@@ -112,6 +112,19 @@ describe('jiraProvider images', () => {
     expect(detail.markdown).toContain('其余附件需要登录 Jira 查看')
   })
 
+  it('hands over a comment image by its attachment id', async () => {
+    const asked: string[] = []
+    const provider = jiraProvider(() => ({
+      myself: async () => ({ displayName: 'x' }),
+      search: async () => [],
+      issue: async () => issue,
+      download: async (id) => { asked.push(id); return new Uint8Array([7]) }
+    }))
+    const image = await provider.image!(settings, { kind: 'basic', payload: { email: 'e', token: 't' } }, 'PROJ-9', '10', signal)
+    expect(asked).toEqual(['10'])
+    expect(image.bytes).toEqual(new Uint8Array([7]))
+  })
+
   it('points to Jira only for attachments it could not bring along', async () => {
     const provider = jiraProvider(() => ({
       myself: async () => ({ displayName: 'x' }),

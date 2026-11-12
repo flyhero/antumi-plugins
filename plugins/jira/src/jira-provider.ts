@@ -133,6 +133,11 @@ export function jiraProvider(connect: (credentials: JiraCredentials) => JiraApi 
       if (!api.commentChanges) throw new SourceError('request-failed', 'Comment sync is unavailable')
       return api.commentChanges(key, signal, options)
     },
+    // An image a comment listed, by its attachment id; Antumi checks that the bytes are an image.
+    async image(settings, credential, _key, id, signal) {
+      const bytes = await client(jiraCredentials(settings, credential)).download(id, MAX_ATTACHMENT_BYTES, AbortSignal.any([signal, AbortSignal.timeout(IMAGE_TIMEOUT_MS)]))
+      return { name: '', bytes }
+    },
     list: (settings, credential, signal) => client(jiraCredentials(settings, credential)).search(settings.jql ?? DEFAULT_JIRA_JQL, signal),
 
     // The raw fields ride along; core keeps only what the issue schema names. Asked for the text
