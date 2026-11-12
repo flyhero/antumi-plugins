@@ -34,10 +34,13 @@ export function isImageAttachment(file: Pick<JiraAttachment, 'mimeType' | 'filen
   return /^image\/(png|jpe?g|gif|webp)$/i.test(file.mimeType) || /\.(png|jpe?g|gif|webp)$/i.test(file.filename)
 }
 
+// Jira is pointed to only for what the reader cannot see here: a file that is not an image, or an
+// image that was not fetched. Images shown below, or on their way, need no login.
 function attachmentSection(issue: JiraIssue, outcomes: ReadonlyMap<string, ImageOutcome>): string | null {
   if (issue.attachments.length === 0) {
     return null
   }
+  const here = issue.attachments.filter((file) => outcomes.get(file.id) === 'saved' || outcomes.get(file.id) === 'deferred')
   return [
     '## 附件',
     ...issue.attachments.map((file) => {
@@ -45,8 +48,7 @@ function attachmentSection(issue: JiraIssue, outcomes: ReadonlyMap<string, Image
       const note = outcome ? `，${IMAGE_NOTE[outcome]}` : ''
       return `- ${escapeLinkText(file.filename)}（${formatSize(file.size)}${note}）`
     }),
-    '',
-    `附件需要登录 Jira 查看：${issue.url}`
+    ...(here.length < issue.attachments.length ? ['', `${here.length > 0 ? '其余附件' : '附件'}需要登录 Jira 查看：${issue.url}`] : [])
   ].join('\n')
 }
 

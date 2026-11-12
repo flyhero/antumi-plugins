@@ -109,6 +109,19 @@ describe('jiraProvider images', () => {
     expect(detail.markdown).toContain('- huge.png（11.0 MB，图片太大或太多，没有下载）')
     expect(detail.markdown).toContain('- denied.jpg（1 KB，图片没能下载）')
     expect(detail.markdown).toContain('- spec.pdf（1 KB）')
+    expect(detail.markdown).toContain('其余附件需要登录 Jira 查看')
+  })
+
+  it('points to Jira only for attachments it could not bring along', async () => {
+    const provider = jiraProvider(() => ({
+      myself: async () => ({ displayName: 'x' }),
+      search: async () => [],
+      issue: async () => ({ ...issue, attachments: issue.attachments.filter((file) => file.id === '1') }),
+      download: async () => new Uint8Array([1])
+    }))
+    const detail = await provider.fetch(settings, { kind: 'basic', payload: { email: 'e', token: 't' } }, 'PROJ-9', signal)
+    expect(detail.markdown).toContain('- shot.png（1 KB，图片见下方）')
+    expect(detail.markdown).not.toContain('需要登录 Jira')
   })
 
   it('leaves the images for later when asked for the text alone, saying how many', async () => {
