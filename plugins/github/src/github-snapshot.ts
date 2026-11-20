@@ -20,7 +20,7 @@ function commentSection(issue: GitHubIssue): string | null {
   return ['## 评论', ...note, ...comments].join('\n\n')
 }
 
-export function githubIssueSnapshot(issue: GitHubIssue): string {
+export function githubIssueSnapshot(issue: GitHubIssue, imageNote = ''): string {
   const metadata = [
     `仓库：${issue.repository}`,
     `作者：${issue.author || '未知'}`,
@@ -31,5 +31,7 @@ export function githubIssueSnapshot(issue: GitHubIssue): string {
     .join('\n')
   const text = [metadata, issue.body, commentSection(issue)].filter((section) => section !== null && section !== '').join('\n\n')
   const marker = '\n\n……（内容过长，后面的部分请在 GitHub 上查看）'
-  return text.length > MAX_SNAPSHOT_LENGTH ? text.slice(0, MAX_SNAPSHOT_LENGTH - marker.length) + marker : text
+  const suffix = imageNote ? `\n\n${imageNote}` : ''
+  const limit = MAX_SNAPSHOT_LENGTH - suffix.length
+  return (text.length > limit ? text.slice(0, limit - marker.length) + marker : text) + suffix
 }

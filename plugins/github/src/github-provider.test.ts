@@ -1,8 +1,9 @@
-import { describe, expect, it } from 'vitest'
-import type { LoginPrompt, SourceIssue } from '@antumi/plugin-sdk'
+import { describe, expect, it, vi } from 'vitest'
+import { MAX_ATTACHMENT_BYTES, MAX_TASK_IMAGES, MAX_SOURCE_IMAGE_BYTES, MAX_SNAPSHOT_LENGTH, type LoginPrompt, type SourceIssue } from '@antumi/plugin-sdk'
 import type { GitHubApi, GitHubCredentials, GitHubIssue } from './github-client.js'
 import { DEFAULT_GITHUB_QUERY, githubProvider } from './github-provider.js'
 import { SourceError } from './source-error.js'
+import { githubImages } from './github-images.js'
 
 const signal = new AbortController().signal
 const summary: SourceIssue = {
@@ -77,5 +78,52 @@ describe('githubProvider', () => {
     expect(detail.markdown).toContain('The login form fails.')
     expect(detail.markdown).toContain('这里是最近 1 条，更早的 2 条在 GitHub 上')
     expect(detail.markdown).toContain('**bob**')
+  })
+
+  it('defers image downloads when Antumi asks for text and keeps partial failures readable', async () => {
+    const body = '![first](https://github.com/user-attachments/assets/first) ![second](https://github.com/user-attachments/assets/second)'
+    const pictured = { ...issue, body, images: githubImages(body, issue.url) }
+    const download = vi.fn(async (url: string) => {
+      if (url.endsWith('second')) throw new Error('no access')
+      return new Uint8Array([1, 2, 3])
+    })
+    const provider = githubProvider(() => ({ ...fakeApi('good', [])({ token: 'good' }), issue: async () => pictured, download }))
+    const credential = { kind: 'token', payload: { token: 'good' } }
+    const text = await provider.fetch({}, credential, issue.key, signal, { images: false })
+    expect(text).toMatchObject({ images: [], imagesDeferred: 2 })
+    expect(download).not.toHaveBeenCalled()
+    const full = await provider.fetch({}, credential, issue.key, signal)
+    expect(full.images).toEqual([{ name: 'first', bytes: new Uint8Array([1, 2, 3]) }])
+    expect(full.markdown).toContain(body)
+    expect(full.markdown).toContain('另有 1 张图片未能下载')
+    expect(download).toHaveBeenCalledTimes(2)
+  })
+
+  it('bounds image counts and the total bytes carried over the plugin protocol', async () => {
+    const images = Array.from({ length: MAX_TASK_IMAGES + 2 }, (_, index) => ({ id: String(index), name: String(index), url: `https://user-images.githubusercontent.com/${index}.png` }))
+    const download = vi.fn(async () => new Uint8Array([1]))
+    const api = { ...fakeApi('good', [])({ token: 'good' }), issue: async () => ({ ...issue, images }), download }
+    const provider = githubProvider(() => api)
+    const credential = { kind: 'token', payload: { token: 'good' } }
+    const full = await provider.fetch({}, credential, issue.key, signal)
+    expect(full.images).toHaveLength(MAX_TASK_IMAGES)
+    expect(download).toHaveBeenCalledTimes(MAX_TASK_IMAGES)
+    expect(full.markdown).toContain('另有 2 张图片未能下载')
+    const large = githubProvider(() => ({ ...api, download: async () => new Uint8Array(MAX_ATTACHMENT_BYTES) }))
+    const bounded = await large.fetch({}, credential, issue.key, signal)
+    expect(bounded.images.reduce((size, image) => size + image.bytes.length, 0)).toBe(MAX_SOURCE_IMAGE_BYTES)
+    expect(bounded.images).toHaveLength(5)
+  })
+
+  it('does not swallow cancellation or exceed the snapshot limit with image outcome notes', async () => {
+    const controller = new AbortController()
+    const images = githubImages('![](https://github.com/user-attachments/assets/a)', issue.url)
+    const api = { ...fakeApi('good', [])({ token: 'good' }), issue: async () => ({ ...issue, body: 'x'.repeat(MAX_SNAPSHOT_LENGTH), images }) }
+    const cancelled = githubProvider(() => ({ ...api, download: async () => { controller.abort(); throw new Error('cancelled') } }))
+    const credential = { kind: 'token', payload: { token: 'good' } }
+    await expect(cancelled.fetch({}, credential, issue.key, controller.signal)).rejects.toBeDefined()
+    const failed = await githubProvider(() => ({ ...api, download: async () => { throw new Error('404') } })).fetch({}, credential, issue.key, signal)
+    expect(failed.markdown.length).toBeLessThanOrEqual(MAX_SNAPSHOT_LENGTH)
+    expect(failed.markdown).toContain('另有 1 张图片未能下载')
   })
 })

@@ -4,14 +4,23 @@
 
 ## 使用
 
-在 Antumi「设置 → 插件」安装 `dist/antumi-plugin-github-1.0.1.zip` 或 `dist/plugin` 目录，在「设置 → 集成 → GitHub」填写筛选条件并登录。
+在 Antumi「设置 → 插件」安装 `dist/antumi-plugin-github-1.2.0.zip` 或 `dist/plugin` 目录，在「设置 → 集成 → GitHub」填写筛选条件并登录。要求 Antumi >=0.20.0-beta.2。
 
 - 使用 Personal access token 登录，或通过 `ANTUMI_GITHUB_TOKEN` 配置凭据。
 - 默认筛选 `assignee:@me is:open`，同步分配给自己的开放 Issues 和 Pull Requests，最多 200 项。
 - 可以使用 `org:acme`、`label:bug`、`is:issue`、`is:pr`、`review-requested:@me` 等 GitHub 搜索条件。
 - 按 `owner/repository#123` 导入，原文快照包含正文、标签和最近 20 条评论，支持重新拉取。
+- 导入和排查时下载正文、最近评论里的图片；新增评论的图片在交给 Agent 时下载。图片较慢时先读取文字，下载后补发。
 
-Token 需要读取账号及目标仓库 Issues / Pull Requests 的权限。具体可见范围由 GitHub 的 Token 类型、仓库访问和组织授权共同决定。插件只读，不修改远端事项；当前插件不下载图片附件。
+Token 需要读取账号及目标仓库 Issues / Pull Requests 的权限。具体可见范围由 GitHub 的 Token 类型、仓库访问和组织授权共同决定。插件只读，不修改远端事项。
+
+## 图片
+
+- 识别 Markdown 行内图片、引用式图片和 HTML `<img>`，优先使用 GitHub 返回的渲染地址（包括 GitHub 图片代理和签名地址），相同图片只下载一次。
+- 支持 PNG、JPEG、GIF、WebP；每次最多 20 张、单张不超过 10 MB、合计不超过 50 MB。超限、无权限或下载失败不会阻断正文导入，快照会注明未下载数量，原链接保留。
+- 只访问 HTTPS 的 GitHub 附件地址和已知图片 CDN，不直接访问任意外部图片站点。GitHub Token 只发送到 GitHub 附件端点，每次跳转都重新检查地址，CDN 请求不带 Token。
+- 新评论保存稳定的图片标识；交给 Agent 时重新读取该评论，获取当前的图片地址，避免使用早已过期的签名链接。
+- GitHub API 的原文与渲染 HTML 使用 [full 媒体类型](https://docs.github.com/en/rest/issues/issues#get-an-issue)读取。私有附件仍受仓库权限约束；无法取得有效图片地址时会作为下载失败处理。
 
 ## 兼容原有安装
 
@@ -21,7 +30,7 @@ Antumi 只保存本仓库的推荐信息，用户点击安装时从 GitHub Relea
 
 ## 独立开发
 
-要求 Node >=22.13。仓库带有 SDK 包 `../../vendor/antumi-plugin-sdk-0.1.0.tgz`，无需等待 SDK 首次发布到 npm：
+要求 Node >=22.13。仓库带有 SDK 包 `../../vendor/antumi-plugin-sdk-0.1.4.tgz`，无需等待 SDK 首次发布到 npm：
 
 ```sh
 # 在仓库根目录安装
@@ -34,7 +43,7 @@ npm run check --workspace antumi-plugin-github
 ```text
 dist/plugin/manifest.json
 dist/plugin/main.mjs
-dist/antumi-plugin-github-1.0.1.zip
+dist/antumi-plugin-github-1.2.0.zip
 ```
 
 ZIP 打包了 SDK 和全部运行时依赖，用户安装时不需要运行 npm 或自行安装 Node。SDK 正式发布后可将 file 依赖改为 npm 版本，并更新 package-lock.json。

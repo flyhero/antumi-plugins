@@ -1,7 +1,7 @@
 import { GitHubClient, GITHUB_KEY_PATTERN, type GitHubApi, type GitHubCredentials } from './github-client.js'
 import { githubIssueSnapshot } from './github-snapshot.js'
 import { SourceError } from './source-error.js'
-import type { SourceCredential, SourcePlugin } from '@antumi/plugin-sdk'
+import { MAX_TASK_IMAGES, MAX_SOURCE_IMAGE_BYTES, type SourceCredential, type SourceFetchOptions, type SourcePlugin } from '@antumi/plugin-sdk'
 
 export const DEFAULT_GITHUB_QUERY = 'assignee:@me is:open'
 
@@ -67,12 +67,45 @@ export function githubProvider(connect: (credentials: GitHubCredentials) => GitH
       if (!api.commentChanges) throw new SourceError('request-failed', 'Comment sync is unavailable')
       return api.commentChanges(key, signal, options)
     },
+    image: (_settings, credential, key, id, signal) => {
+      const api = client(githubCredentials(credential))
+      if (!api.commentImage) throw new SourceError('request-failed', 'Comment images are unavailable')
+      return api.commentImage(key, id, signal)
+    },
     list: (settings, credential, signal) => client(githubCredentials(credential)).search(settings.query ?? DEFAULT_GITHUB_QUERY, signal),
 
-    async fetch(_settings, credential, key, signal) {
+    async fetch(_settings, credential, key, signal, options?: SourceFetchOptions) {
       if (!GITHUB_KEY_PATTERN.test(key)) throw new SourceError('not-found', `not a GitHub issue key: ${key}`)
-      const issue = await client(githubCredentials(credential)).issue(key, signal)
-      return { ...issue, markdown: githubIssueSnapshot(issue) }
+      const api = client(githubCredentials(credential))
+      const issue = await api.issue(key, signal)
+      signal.throwIfAborted()
+      const candidates = issue.images ?? []
+      const wanted = candidates.slice(0, MAX_TASK_IMAGES)
+      if (options?.images === false) return {
+        ...issue, markdown: githubIssueSnapshot(issue, wanted.length ? `（${wanted.length} 张图片稍后下载）` : ''), images: [], imagesDeferred: wanted.length
+      }
+      const images: { name: string; bytes: Uint8Array }[] = []
+      const downloading = AbortSignal.any([signal, AbortSignal.timeout(30_000)])
+      let size = 0
+      for (let at = 0; at < wanted.length && size < MAX_SOURCE_IMAGE_BYTES && !downloading.aborted; at += 3) {
+        signal.throwIfAborted()
+        const fetched = await Promise.all(wanted.slice(at, at + 3).map(async (image) => {
+          try {
+            const bytes = await api.download?.(image.url, downloading)
+            return bytes ? { name: image.name, bytes } : null
+          } catch {
+            signal.throwIfAborted()
+            return null
+          }
+        }))
+        for (const image of fetched) {
+          if (image && size + image.bytes.byteLength <= MAX_SOURCE_IMAGE_BYTES) { images.push(image); size += image.bytes.byteLength }
+        }
+      }
+      signal.throwIfAborted()
+      const lost = candidates.length - images.length
+      const note = candidates.length ? `（已下载 ${images.length} 张图片${lost ? `；另有 ${lost} 张图片未能下载或超出数量、大小限制，原链接保留在正文中` : ''}）` : ''
+      return { ...issue, markdown: githubIssueSnapshot(issue, note), images }
     }
   } satisfies SourcePlugin
 }

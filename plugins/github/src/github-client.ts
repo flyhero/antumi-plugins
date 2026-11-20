@@ -1,13 +1,16 @@
 import { z } from 'zod'
 import { commentState, commentPage, SourceComment, type SourceCommentState, type SourceCommentOptions, type SourceCommentPage } from '@antumi/plugin-sdk'
-import { MAX_ISSUE_TITLE_LENGTH, type SourceIssue } from '@antumi/plugin-sdk'
+import { MAX_ISSUE_TITLE_LENGTH, MAX_TASK_IMAGES, type SourceIssue } from '@antumi/plugin-sdk'
 import { SourceError } from './source-error.js'
+import { githubImages, type GitHubImage } from './github-images.js'
+import { downloadGitHubImage } from './github-image-download.js'
 
 export const GITHUB_KEY_PATTERN = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)#([1-9][0-9]*)$/
 
 export type GitHubCredentials = { token: string }
 export type GitHubComment = { author: string; created: number | null; body: string }
 export type GitHubIssue = SourceIssue & {
+  images?: GitHubImage[]
   commentState?: SourceCommentState
   repository: string
   author: string
@@ -18,6 +21,8 @@ export type GitHubIssue = SourceIssue & {
 }
 
 export type GitHubApi = {
+  download?(url: string, signal: AbortSignal): Promise<Uint8Array>
+  commentImage?(key: string, id: string, signal: AbortSignal): Promise<{ name: string; bytes: Uint8Array }>
   commentChanges?(key: string, signal: AbortSignal, options: SourceCommentOptions): Promise<SourceCommentPage>
   myself(signal: AbortSignal): Promise<{ login: string }>
   search(query: string, signal: AbortSignal): Promise<SourceIssue[]>
@@ -47,6 +52,7 @@ const IssueRow = z.object({
   state_reason: z.string().nullish(),
   updated_at: z.string().nullish(),
   body: z.string().nullish(),
+  body_html: z.string().nullish(),
   user: User.nullish(),
   labels: z.array(Label).nullish(),
   comments: z.number().int().nonnegative().nullish(),
@@ -58,10 +64,24 @@ const SearchPage = z.object({ items: z.array(IssueRow) })
 const Comment = z.object({
   id: z.union([z.number().int(), z.string()]).optional(), updated_at: z.string().nullish(), html_url: z.string().optional(),
   body: z.string().nullish(),
+  body_html: z.string().nullish(),
+  issue_url: z.string().optional(),
   user: User.nullish(),
   created_at: z.string().nullish()
 })
 const ErrorBody = z.object({ message: z.string().optional() })
+
+function issuePath(key: string): string {
+  const match = GITHUB_KEY_PATTERN.exec(key)
+  if (!match || ['.', '..'].includes(match[1] ?? '') || ['.', '..'].includes(match[2] ?? '')) throw new SourceError('not-found', 'Invalid GitHub issue key')
+  return `/repos/${encodeURIComponent(match[1] ?? '')}/${encodeURIComponent(match[2] ?? '')}/issues/${match[3]}`
+}
+
+function structuredComment(comment: z.infer<typeof Comment>, url: string) {
+  const images = githubImages(comment.body ?? '', comment.html_url ?? url, comment.body_html).slice(0, MAX_TASK_IMAGES)
+    .map((image) => ({ id: `${comment.id}:${image.id}`, name: image.name }))
+  return { id: comment.id === undefined ? '' : String(comment.id), author: comment.user?.login ?? '', createdAt: time(comment.created_at), updatedAt: time(comment.updated_at), url: comment.html_url ?? url, markdown: (comment.body ?? '').slice(0, 50_000), truncated: (comment.body?.length ?? 0) > 50_000, ...(images.length ? { images } : {}) }
+}
 
 function parse<T>(schema: z.ZodType<T>, value: unknown): T {
   const parsed = schema.safeParse(value)
@@ -217,18 +237,22 @@ export class GitHubClient implements GitHubApi {
     }
     const repository = `${owner}/${repo}`
     const path = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${number}`
-    const row = parse(IssueRow, await this.get(path, signal))
+    const row = parse(IssueRow, await this.get(path, signal, 'application/vnd.github.full+json'))
     const summary = summarize(repository, row)
     if (!summary || summary.key !== key) {
       throw new SourceError('request-failed', 'GitHub answered with a mismatched issue')
     }
     const rawComments = await this.comments(path, row.comments ?? 0, signal)
-    const structured = rawComments.map((comment) => SourceComment.safeParse({ id: comment.id === undefined ? '' : String(comment.id), author: comment.user?.login ?? '', createdAt: time(comment.created_at), updatedAt: time(comment.updated_at), url: comment.html_url ?? summary.url, markdown: (comment.body ?? '').slice(0, 50_000), truncated: (comment.body?.length ?? 0) > 50_000 }))
+    const structured = rawComments.map((comment) => SourceComment.safeParse(structuredComment(comment, summary.url)))
     const state = structured.every((value) => value.success) ? commentState(structured.flatMap((value) => value.data ? [value.data] : [])) : undefined
     const comments = rawComments.slice(-20)
       .map((comment) => ({ author: comment.user?.login ?? '', created: time(comment.created_at), body: comment.body ?? '' }))
     return {
       ...summary,
+      images: [...new Map([
+        ...githubImages(row.body ?? '', summary.url, row.body_html),
+        ...rawComments.slice(-COMMENT_LIMIT).flatMap((comment) => githubImages(comment.body ?? '', comment.html_url ?? summary.url, comment.body_html))
+      ].map((image) => [image.id, image])).values()],
       ...(state ? { commentState: state } : {}),
       repository,
       author: row.user?.login ?? '',
@@ -240,26 +264,40 @@ export class GitHubClient implements GitHubApi {
   }
 
   async commentChanges(key: string, signal: AbortSignal, options: SourceCommentOptions): Promise<SourceCommentPage> {
-    const match = GITHUB_KEY_PATTERN.exec(key)
-    if (!match) throw new SourceError('not-found', 'Invalid GitHub issue key')
-    const path = `/repos/${encodeURIComponent(match[1] ?? '')}/${encodeURIComponent(match[2] ?? '')}/issues/${match[3]}`
+    const path = issuePath(key)
     const row = parse(IssueRow, await this.get(path, signal))
     const comments: SourceComment[] = []
     for (let page = Math.max(1, Math.ceil((row.comments ?? 0) / COMMENT_PAGE_SIZE)); page >= 1; page--) {
-      const rows = parse(z.array(Comment), await this.get(`${path}/comments?${new URLSearchParams({ per_page: String(COMMENT_PAGE_SIZE), page: String(page) })}`, signal))
-      for (const comment of rows) comments.push(SourceComment.parse({ id: comment.id === undefined ? '' : String(comment.id), author: comment.user?.login ?? '', createdAt: time(comment.created_at), updatedAt: time(comment.updated_at), url: comment.html_url ?? row.html_url, markdown: (comment.body ?? '').slice(0, 50_000), truncated: (comment.body?.length ?? 0) > 50_000 }))
+      const rows = parse(z.array(Comment), await this.get(`${path}/comments?${new URLSearchParams({ per_page: String(COMMENT_PAGE_SIZE), page: String(page) })}`, signal, 'application/vnd.github.full+json'))
+      for (const comment of rows) comments.push(SourceComment.parse(structuredComment(comment, row.html_url)))
       if (rows.some((comment) => (time(comment.created_at) ?? Infinity) < options.checkpoint.createdAt)) break
       if (page > 1000) throw new SourceError('response-too-large', 'Comment history is too large')
     }
     return commentPage(comments, options)
   }
 
-  private async get(pathAndQuery: string, signal: AbortSignal): Promise<unknown> {
+  download(url: string, signal: AbortSignal): Promise<Uint8Array> {
+    return downloadGitHubImage(url, this.credentials.token, signal, this.fetchImpl)
+  }
+
+  // Refresh a comment's signed URLs at delivery time instead of persisting expiring URLs as IDs.
+  async commentImage(key: string, id: string, signal: AbortSignal): Promise<{ name: string; bytes: Uint8Array }> {
+    const path = issuePath(key)
+    const match = /^(\d+):([0-9a-f]{64})$/.exec(id)
+    if (!match) throw new SourceError('not-found', 'Invalid GitHub comment image')
+    const comment = parse(Comment, await this.get(`${path.replace(/\/issues\/\d+$/, '')}/issues/comments/${match[1]}`, signal, 'application/vnd.github.full+json'))
+    if (!comment.issue_url || new URL(comment.issue_url).pathname.toLowerCase() !== path.toLowerCase()) throw new SourceError('not-found', 'The comment does not belong to this issue')
+    const image = githubImages(comment.body ?? '', comment.html_url ?? `https://github.com/${key.replace('#', '/issues/')}`, comment.body_html).find((image) => image.id === match[2])
+    if (!image) throw new SourceError('not-found', 'The image is no longer in the GitHub comment')
+    return { name: image.name, bytes: await this.download(image.url, signal) }
+  }
+
+  private async get(pathAndQuery: string, signal: AbortSignal, accept = 'application/vnd.github+json'): Promise<unknown> {
     let response: Response
     try {
       response = await this.fetchImpl(`${this.base}${pathAndQuery}`, {
         headers: {
-          Accept: 'application/vnd.github+json',
+          Accept: accept,
           Authorization: `Bearer ${this.credentials.token}`,
           'User-Agent': 'Antumi',
           'X-GitHub-Api-Version': '2022-11-28'
@@ -279,7 +317,7 @@ export class GitHubClient implements GitHubApi {
     const page = Math.ceil(total / COMMENT_PAGE_SIZE)
     const fetchPage = (number: number) => {
       const query = new URLSearchParams({ per_page: String(COMMENT_PAGE_SIZE), page: String(number) })
-      return this.get(`${path}/comments?${query}`, signal).then((value) => parse(z.array(Comment), value))
+      return this.get(`${path}/comments?${query}`, signal, 'application/vnd.github.full+json').then((value) => parse(z.array(Comment), value))
     }
     const latest = await fetchPage(page)
     const previous = latest.length < COMMENT_LIMIT && page > 1 ? await fetchPage(page - 1) : []
