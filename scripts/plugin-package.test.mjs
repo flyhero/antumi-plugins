@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { pluginPackage, releasePackage } from './plugin-package.mjs'
 
 test('resolves independent plugin versions and matching release tags', async () => {
-  for (const slug of ['github', 'jira', 'linear', 'zentao']) {
+  for (const slug of ['github', 'jira', 'linear', 'zentao', 'meegle']) {
     const plugin = await pluginPackage(slug)
     const release = await releasePackage(`${slug}-v${plugin.pkg.version}`)
     assert.equal(release.manifest.id, `antumi.${slug}`)

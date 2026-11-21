@@ -1,0 +1,69 @@
+{
+  "id": "antumi.meegle",
+  "version": "0.1.0",
+  "engines": {
+    "antumi": ">=0.15.11 <1.0.0"
+  },
+  "contributes": {
+    "sources": [
+      {
+        "id": "meegle",
+        "name": "飞书项目 / Meegle",
+        "settings": [
+          {
+            "key": "space",
+            "type": "url",
+            "label": "空间地址",
+            "required": true,
+            "bindsCredential": true,
+            "placeholder": "https://project.feishu.cn/your-space/overview",
+            "hint": "在空间里打开任意页面，复制浏览器地址栏的地址。飞书项目和 Meegle（Lark）都支持，按域名区分。修改后需要重新登录。",
+            "translations": {
+              "en": {
+                "label": "Space URL",
+                "hint": "Open any page in the space and copy the address. Works for both Feishu Project and Meegle (Lark). Changing it signs you out."
+              }
+            }
+          },
+          {
+            "key": "types",
+            "type": "text",
+            "label": "工作项类型",
+            "required": true,
+            "default": "story,issue",
+            "mono": true,
+            "hint": "工作项类型的 key，逗号分隔。默认是需求（story）和缺陷（issue）；填错时同步会列出空间里可用的类型。",
+            "translations": {
+              "en": {
+                "label": "Work item types",
+                "hint": "Comma-separated type keys. Defaults to stories (story) and issues (issue); a wrong key makes the sync list the space's types."
+              }
+            }
+          },
+          {
+            "key": "filter",
+            "type": "textarea",
+            "label": "筛选条件（MQL）",
+            "required": true,
+            "mono": true,
+            "default": "array_contains(all_participate_persons(), current_login_user()) AND `archiving_status` = false",
+            "hint": "只写 WHERE 后面的条件，按字段 key 书写。默认是我参与的、未归档的工作项；当前负责人是我：array_contains(`current_status_operator`, current_login_user())；我创建的：`owner` = current_login_user()。",
+            "translations": {
+              "en": {
+                "label": "Filter (MQL)",
+                "hint": "Only the condition after WHERE, written with field keys. Defaults to unarchived items I take part in. Currently mine: array_contains(`current_status_operator`, current_login_user()); created by me: `owner` = current_login_user()."
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "entry": {
+    "runtime": "node",
+    "main": "main.mjs"
+  },
+  "env": [
+    "ANTUMI_MEEGLE_TOKEN"
+  ]
+}

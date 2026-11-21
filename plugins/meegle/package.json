@@ -1,0 +1,20 @@
+{
+  "name": "antumi-plugin-meegle",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "node ../../scripts/build.mjs meegle",
+    "check": "npm run typecheck && npm test && npm run build"
+  },
+  "dependencies": {
+    "@antumi/plugin-sdk": "file:../../vendor/antumi-plugin-sdk-0.1.4.tgz",
+    "zod": "4.6.5"
+  }
+}
