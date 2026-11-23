@@ -20,6 +20,11 @@ const sleep: Sleep = (ms, signal) => new Promise((resolve, reject) => {
 
 class Retry extends Error {}
 
+// A field or option label the space does not have, named when the server says which.
+export class UnknownField extends SourceError {
+  constructor(readonly field: string | undefined, message: string) { super('invalid-settings', message) }
+}
+
 // A reply is plain JSON or an SSE stream whose last data line holds the result.
 export function parseFrame(body: string): unknown {
   let last: unknown
@@ -94,7 +99,10 @@ export class McpSession {
     const detail = this.scrub(`${code ? `${code}：` : ''}${message}`.slice(0, 300))
     if (/NoPermission|Forbidden/i.test(code)) return new SourceError('forbidden', `没有权限：${detail}${trace}`)
     if (/NotFound/i.test(code)) return new SourceError('not-found', `找不到：${detail}${trace}`)
-    if (/attr(ibute)? ?(value)?label not found|attribute not found|3010/i.test(message)) return new SourceError('invalid-settings', `查询条件有误，请检查工作项类型：${detail}${trace}`)
+    if (/attr(ibute)? ?(value)?label not found|attribute not found|3010/i.test(message)) {
+      const field = /\blabel:([A-Za-z0-9_]+)/.exec(message)?.[1]
+      return new UnknownField(field, `${field ? `空间里没有字段「${field}」，请检查筛选条件` : '查询里有空间不认识的字段或选项，请检查筛选条件'}：${detail}${trace}`)
+    }
     return new SourceError('request-failed', `飞书项目返回错误 ${detail}${trace}`)
   }
 

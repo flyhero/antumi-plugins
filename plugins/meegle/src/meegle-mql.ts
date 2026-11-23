@@ -1,22 +1,28 @@
 import { z } from 'zod'
 import { SourceError } from '@antumi/plugin-sdk'
 
-export const DEFAULT_FILTER = 'array_contains(all_participate_persons(), current_login_user()) AND `archiving_status` = false'
+export const DEFAULT_FILTER = 'array_contains(all_participate_persons(), current_login_user())'
+// 0.1.0's default; not every space has `archiving_status`, so a saved copy reads as today's.
+const FIRST_DEFAULT = 'array_contains(all_participate_persons(), current_login_user()) AND `archiving_status` = false'
+// Fields every work item has; the rest are read when the space has them.
+const COLUMNS = ['work_item_id', 'name', 'work_item_status', 'updated_at']
+export const OPTIONAL_COLUMNS = ['priority']
 
 const identifier = (value: string) => `\`${value.replace(/`/g, '')}\``
 
 // The user writes the condition alone: the plugin picks the space, the type and the columns it reads.
 export function normalizeFilter(value: string | undefined): string {
-  const filter = (value ?? '').replace(/\s+/g, ' ').trim() || DEFAULT_FILTER
+  const given = (value ?? '').replace(/\s+/g, ' ').trim()
+  const filter = !given || given === FIRST_DEFAULT ? DEFAULT_FILTER : given
   const outside = filter.replace(/'(?:[^']|'')*'|`[^`]*`/g, '')
   if (/;|\b(select|from|order\s+by|limit)\b/i.test(outside)) throw new SourceError('invalid-settings', '筛选条件只写 WHERE 后面的部分，不要包含 SELECT、FROM、ORDER BY 或 LIMIT')
   if (filter.length > 2000) throw new SourceError('invalid-settings', '筛选条件太长')
   return filter
 }
 
-export function buildMql(space: string, type: string, filter: string): string {
+export function buildMql(space: string, type: string, filter: string, optional: readonly string[] = OPTIONAL_COLUMNS): string {
   return [
-    'SELECT `work_item_id`, `name`, `work_item_status`, `priority`, `updated_at`, `archiving_status`',
+    `SELECT ${[...COLUMNS, ...optional].map(identifier).join(', ')}`,
     `FROM ${identifier(space)}.${identifier(type)}`,
     `WHERE ${filter}`,
     'ORDER BY `updated_at` DESC'
@@ -40,7 +46,7 @@ export const MqlPage = z.object({
 }).passthrough()
 export type MqlPage = z.infer<typeof MqlPage>
 
-export type MqlItem = { id: string, name: string, status: string | null, priority: string | null, updatedOn: string | null, archived: boolean }
+export type MqlItem = { id: string, name: string, status: string | null, priority: string | null, updatedOn: string | null }
 
 function text(value: z.infer<typeof Value> | null | undefined): string | null {
   if (!value) return null
@@ -60,12 +66,10 @@ export function rows(page: MqlPage): MqlItem[] {
       const fields = new Map((row.moql_field_list ?? []).map((field) => [field.key, field.value]))
       const id = text(fields.get('work_item_id'))
       if (!id || !/^[1-9][0-9]{0,18}$/.test(id)) throw new SourceError('request-failed', '飞书项目返回了无效的工作项 ID')
-      const archived = fields.get('archiving_status')
       items.push({
         id, name: text(fields.get('name')) ?? `#${id}`,
         status: text(fields.get('work_item_status')), priority: text(fields.get('priority')),
-        updatedOn: text(fields.get('updated_at')),
-        archived: archived?.bool_value === true || archived?.string_value === 'true' || archived?.long_value === 1
+        updatedOn: text(fields.get('updated_at'))
       })
     }
   }

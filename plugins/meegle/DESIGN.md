@@ -109,7 +109,7 @@
 |---|---|---|
 | `space` | url | 粘贴空间里任意页面的地址。域名决定站点：飞书项目是 `project.feishu.cn`，Meegle 是 `project.larksuite.com` 或 `meegle.com`；其他域名直接拒绝。保存为 `https://<域名>/<simple_name>`，带 `bindsCredential`，改了要重新登录 |
 | `types` | text | 类型 key，用逗号分隔，默认 `story,issue`，最多 10 个 |
-| `filter` | textarea | 筛选条件（MQL），只写 `WHERE` 后面的部分，和 Jira 插件的 JQL 一样由用户决定范围。默认 ``array_contains(all_participate_persons(), current_login_user()) AND `archiving_status` = false``（我参与的、未归档）。说明文字给出「当前负责人是我」「我创建的」的写法。不能包含 `SELECT`、`FROM`、`ORDER BY`、`LIMIT` 和分号：MQL 一次只能查一种类型，列和排序要由插件固定，收件箱条目才能生成 |
+| `filter` | textarea | 筛选条件（MQL），只写 `WHERE` 后面的部分，和 Jira 插件的 JQL 一样由用户决定范围。默认 ``array_contains(all_participate_persons(), current_login_user())``（我参与的）。说明文字给出「当前负责人是我」「我创建的」的写法。不能包含 `SELECT`、`FROM`、`ORDER BY`、`LIMIT` 和分号：MQL 一次只能查一种类型，列和排序要由插件固定，收件箱条目才能生成 |
 
 飞书项目和 Meegle 是同一个产品的国内版和国际版，接口相同，账号和服务器分开，所以不另设「站点」选项，从空间地址的域名判断。`www.meegle.com` 视同 `meegle.com`；路径开头的 `/meego` 前缀会被去掉。
 
@@ -132,7 +132,7 @@
 2. 每个类型发一条 MQL：
 
    ```
-   SELECT `work_item_id`,`name`,`work_item_status`,`priority`,`updated_at`,`archiving_status`
+   SELECT `work_item_id`,`name`,`work_item_status`,`updated_at`[,`priority`]
    FROM `<simple_name>`.`<type_key>`
    WHERE <筛选条件>
    ORDER BY `updated_at` DESC
@@ -146,7 +146,7 @@
    | `key` | `work_item_id`（全局唯一，详情只需要它） |
    | `title` | `name` |
    | `status` | `work_item_status` 的 label |
-   | `statusCategory` | 已归档或已终止为 `done`，其余为 `unknown`（状态是空间自定义的，没有通用的「进行中」标记；这个字段只影响颜色） |
+   | `statusCategory` | `unknown`（状态是空间自定义的，没有通用的完成或进行中标记；这个字段只影响颜色） |
    | `type` | 类型的显示名 |
    | `priority` | label |
    | `updatedAt` | 那一天 0 点的毫秒数（精确到天） |
@@ -154,7 +154,7 @@
 
 4. 「开发确认后自动进 Antumi」的做法：筛选条件写 ``array_contains(`current_status_operator`, current_login_user())``（当前负责人是我）。工作项在 Meegle 里流转到开发节点、负责人变成他之后，下一轮同步就会出现在结果里，「新问题自动排查」会给它开会话。这一步不需要在插件里写状态名。
 
-`archiving_status` 有分歧：官方文档写的是 `archiving_date IS NULL`，WB 实测用的是布尔值 `archiving_status = false`。实现时先用后者，联调时两种都试（见第 9 节）。
+不是每个空间都有 `archiving_status`：0.1.0 把它放进固定的列和默认条件，在一个有 57 个字段的 Meegle 空间里报 `attribute not found (3003) … label:archiving_status`（2026-11-23，issue #11），而且只要它在 `SELECT` 里，用户怎么改条件都失败。0.1.1 起固定列只留每个工作项都有的 `work_item_id`、`name`、`work_item_status`、`updated_at`；`priority` 是可选列，服务端说没有这个字段就去掉重查。归档与否不再判断，要排除归档由用户在条件里写空间支持的字段。保存过的 0.1.0 默认条件按新默认值读取。
 
 ## 7. 拉取（`fetch`）
 
@@ -191,7 +191,7 @@
 | Lark 版登录后的 MCP 配置页地址 | 空间域名加 `/b/mcp` | 提示里改成「在 Meegle 里打开 设置 → MCP」 |
 | 在 `project.larksuite.com` 上用 `X-Mcp-Token` 调 MQL | 和 feishu 一样 | 无，这是发版的前提 |
 | MQL 的 `FROM` 用 simple_name | 能用（feishu 实测过） | 先调 `search_project_info` 换成 `project_key` |
-| 判断未归档 | `archiving_status = false` | `archiving_date IS NULL` |
+| 判断未归档 | 已确认：有的空间没有 `archiving_status`，0.1.1 起不再判断 | 由用户在条件里写 |
 | `priority` 在详情里的格式 | `{label}`，也兼容 `{name}` 和字符串 | 原样转成文本 |
 | `list_workitem_comments` 返回的字段名 | `comments` 或 `list`，每条有 `content`、`creator`、`created_at` | 解析失败就跳过评论 |
 | 英文界面下的 `work_item_status` 和 `priority` | 返回英文 label，查询里只用 key，不受影响 | 无需退路 |

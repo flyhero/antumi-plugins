@@ -60,12 +60,14 @@ describe('space address', () => {
 
 describe('MQL', () => {
   it('wraps the user condition with the space, the type and the columns the inbox reads', () => {
-    expect(buildMql('shop', 'issue', DEFAULT_FILTER)).toBe('SELECT `work_item_id`, `name`, `work_item_status`, `priority`, `updated_at`, `archiving_status` FROM `shop`.`issue` WHERE array_contains(all_participate_persons(), current_login_user()) AND `archiving_status` = false ORDER BY `updated_at` DESC')
+    expect(buildMql('shop', 'issue', DEFAULT_FILTER)).toBe('SELECT `work_item_id`, `name`, `work_item_status`, `updated_at`, `priority` FROM `shop`.`issue` WHERE array_contains(all_participate_persons(), current_login_user()) ORDER BY `updated_at` DESC')
+    expect(buildMql('shop', 'issue', DEFAULT_FILTER, [])).toContain('SELECT `work_item_id`, `name`, `work_item_status`, `updated_at` FROM')
     expect(buildMql('sh`op', 'story', '`owner` = current_login_user()')).toContain('FROM `shop`.`story` WHERE `owner` = current_login_user() ORDER BY')
   })
 
   it('keeps the filter to a condition', () => {
     expect(normalizeFilter('  ')).toBe(DEFAULT_FILTER)
+    expect(normalizeFilter('array_contains(all_participate_persons(), current_login_user()) AND `archiving_status` = false')).toBe(DEFAULT_FILTER)
     expect(normalizeFilter(' array_contains(`current_status_operator`,\n current_login_user()) ')).toBe('array_contains(`current_status_operator`, current_login_user())')
     expect(normalizeFilter("`name` LIKE '%select from%'")).toBe("`name` LIKE '%select from%'")
     for (const filter of ['1=1 ORDER BY `name`', '1=1 LIMIT 5', 'x IN (SELECT y FROM z)', '1=1; DROP']) expect(() => normalizeFilter(filter), filter).toThrow(SourceError)
@@ -145,9 +147,26 @@ describe('sync', () => {
     expect(calls[2]?.args).toEqual({ project_key: 'shop', session_id: 's1', group_pagination_list: [{ group_id: '1', page_num: 2 }] })
   })
 
-  it('links custom types by their route name and marks archived items done', async () => {
-    const { session } = server({ list_workitem_types: types, search_by_mql: () => ({ list: [{ count: 1 }], data: { 1: [row(9, 'Review', [field('archiving_status', { bool_value: true })])] } }) })
-    expect(await new MeegleClient(session).list(space, { types: ['63f0a1'], filter: 'work_item_id > 0' }, signal)).toMatchObject([{ url: 'https://project.larksuite.com/shop/review_process/detail/9', statusCategory: 'done', type: 'Review' }])
+  it('links custom types by their route name', async () => {
+    const { session } = server({ list_workitem_types: types, search_by_mql: () => ({ list: [{ count: 1 }], data: { 1: [row(9, 'Review')] } }) })
+    expect(await new MeegleClient(session).list(space, { types: ['63f0a1'], filter: 'work_item_id > 0' }, signal)).toMatchObject([{ url: 'https://project.larksuite.com/shop/review_process/detail/9', statusCategory: 'unknown', type: 'Review' }])
+  })
+
+  // The server's words when a space lacks a field (a Meegle space without `archiving_status`, 2026-11-23).
+  const missing = (label: string) => `error=ErrMetadataError,message=metadata error,attribute not found (Code: 3003) | Context: attr label not found, projectKey:6afe, typeKey:story, labelRequestUUID:${label}, label:${label}. no similar field exists among its 57 fields,retriable=false`
+
+  it('drops an optional column the space lacks and names a missing field in the filter', async () => {
+    const { session, calls } = server({ list_workitem_types: types, search_by_mql: (args) => {
+      if (String(args.mql).includes('`priority`')) throw new Error(missing('priority'))
+      return { list: [{ count: 1 }], data: { 1: [row(3, 'No priority')] } }
+    } })
+    expect(await new MeegleClient(session).list(space, { types: ['story'], filter: DEFAULT_FILTER }, signal)).toMatchObject([{ key: '3' }])
+    expect(calls.map((call) => String(call.args.mql ?? ''))[2]).not.toContain('priority')
+
+    const strict = server({ list_workitem_types: types, search_by_mql: () => { throw new Error(missing('archiving_status')) } })
+    await expect(new MeegleClient(strict.session).list(space, { types: ['story'], filter: '`archiving_status` = false' }, signal))
+      .rejects.toMatchObject({ code: 'invalid-settings', message: expect.stringContaining('空间里没有字段「archiving_status」') })
+    expect(strict.calls).toHaveLength(2)
   })
 
   it('names the available types when one is unknown, and handles an empty result', async () => {

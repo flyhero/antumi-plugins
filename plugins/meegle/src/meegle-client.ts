@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { MAX_ISSUE_TITLE_LENGTH, MAX_SNAPSHOT_LENGTH, SourceError, type SourceIssue, type SourceIssueDetail } from '@antumi/plugin-sdk'
-import type { McpSession } from './mcp-session.js'
-import { buildMql, day, MqlPage, rows, type MqlItem } from './meegle-mql.js'
+import { UnknownField, type McpSession } from './mcp-session.js'
+import { buildMql, day, MqlPage, OPTIONAL_COLUMNS, rows, type MqlItem } from './meegle-mql.js'
 import { itemUrl, type Space } from './meegle-url.js'
 
 export type ListOptions = { types: readonly string[], filter: string }
@@ -77,10 +77,10 @@ export class MeegleClient {
     for (const type of options.types) {
       const info = known.get(type)
       if (!info) throw new SourceError('invalid-settings', `空间里没有工作项类型「${type}」，可用的有：${[...known.keys()].join('、')}`)
-      for (const item of await this.query(space, buildMql(space.simpleName, type, options.filter), signal)) {
+      for (const item of await this.search(space, type, options.filter, signal)) {
         found.push({
           key: item.id, title: item.name.slice(0, MAX_ISSUE_TITLE_LENGTH), url: itemUrl(space, info.route, item.id),
-          status: (item.status ?? '未知').slice(0, 100), statusCategory: item.archived ? 'done' : 'unknown',
+          status: (item.status ?? '未知').slice(0, 100), statusCategory: 'unknown',
           type: info.name.slice(0, 100), priority: item.priority?.slice(0, 100) ?? null, updatedAt: day(item.updatedOn)
         })
       }
@@ -125,6 +125,20 @@ export class MeegleClient {
   private async types(space: Space, signal: AbortSignal): Promise<Map<string, { name: string, route: string }>> {
     const types = parse(Types, await this.mcp.call('list_workitem_types', { project_key: space.simpleName }, signal), '工作项类型')
     return new Map((types.list ?? []).map((type) => [type.type_key, { name: type.name || type.type_key, route: type.api_name || type.type_key }]))
+  }
+
+  // A space may lack an optional column; it is dropped and the query run again without it.
+  private async search(space: Space, type: string, filter: string, signal: AbortSignal): Promise<MqlItem[]> {
+    let optional = OPTIONAL_COLUMNS
+    for (;;) {
+      try {
+        return await this.query(space, buildMql(space.simpleName, type, filter, optional), signal)
+      } catch (failure) {
+        const missing = failure instanceof UnknownField ? failure.field : undefined
+        if (!missing || !optional.includes(missing)) throw failure
+        optional = optional.filter((column) => column !== missing)
+      }
+    }
   }
 
   private async query(space: Space, mql: string, signal: AbortSignal): Promise<MqlItem[]> {

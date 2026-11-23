@@ -12,7 +12,7 @@
 | --- | --- |
 | 空间地址 | 在空间里打开任意页面，复制地址。按域名区分飞书项目（`project.feishu.cn`）和 Meegle（`project.larksuite.com`、`meegle.com`） |
 | 工作项类型 | 类型 key，逗号分隔，默认 `story,issue`；填错时同步会列出空间里的类型 |
-| 筛选条件（MQL） | 只写 WHERE 后面的条件，用字段 key 书写；默认是我参与的、未归档的工作项 |
+| 筛选条件（MQL） | 只写 WHERE 后面的条件，用字段 key 书写；默认是我参与的工作项 |
 
 登录只需要一个 MCP Token：在空间所在站点的 `/b/mcp` 配置页，打开个人偏好里的 MCP 开关，数据权限只勾「允许查看数据信息」，复制 `m-` 开头的 Token。不需要在开发者后台建插件。Token 长期有效，在配置页重置即失效。也可以用 `ANTUMI_MEEGLE_TOKEN` 配置。
 

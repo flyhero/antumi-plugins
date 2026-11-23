@@ -1,6 +1,6 @@
 {
   "id": "antumi.meegle",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "engines": {
     "antumi": ">=0.15.11 <1.0.0"
   },
@@ -46,12 +46,12 @@
             "label": "筛选条件（MQL）",
             "required": true,
             "mono": true,
-            "default": "array_contains(all_participate_persons(), current_login_user()) AND `archiving_status` = false",
-            "hint": "只写 WHERE 后面的条件，按字段 key 书写。默认是我参与的、未归档的工作项；当前负责人是我：array_contains(`current_status_operator`, current_login_user())；我创建的：`owner` = current_login_user()。",
+            "default": "array_contains(all_participate_persons(), current_login_user())",
+            "hint": "只写 WHERE 后面的条件，按字段 key 书写。默认是我参与的工作项；当前负责人是我：array_contains(`current_status_operator`, current_login_user())；我创建的：`owner` = current_login_user()。",
             "translations": {
               "en": {
                 "label": "Filter (MQL)",
-                "hint": "Only the condition after WHERE, written with field keys. Defaults to unarchived items I take part in. Currently mine: array_contains(`current_status_operator`, current_login_user()); created by me: `owner` = current_login_user()."
+                "hint": "Only the condition after WHERE, written with field keys. Defaults to items I take part in. Currently mine: array_contains(`current_status_operator`, current_login_user()); created by me: `owner` = current_login_user()."
               }
             }
           }
