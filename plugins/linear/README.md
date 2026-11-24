@@ -4,19 +4,28 @@
 
 ## 在 Antumi 使用
 
-在「设置 → 插件」安装 `dist/antumi-plugin-linear-0.1.0.zip`，或安装 `dist/plugin` 目录。在「设置 → 集成 → Linear」配置筛选条件并登录。
+在「设置 → 插件」安装 `dist/antumi-plugin-linear-0.3.0.zip`，或安装 `dist/plugin` 目录。在「设置 → 集成 → Linear」配置筛选条件并登录。
 
-- 创建具有 **Read** 权限的个人 API Key，可以限制为特定团队。
+- 创建具有 **Read** 和 **Write** 权限的个人 API Key，可以限制为特定团队。只做同步时 Read 就够。
 - 团队填写短标识（例如 `ENG`），项目填写 UUID；都可以留空。
 - 指派给默认为 `@me`；可以填邮箱或留空同步所有人。
 - 默认同步未完成事项，每次最多 200 项；不包含已归档事项。
 - 使用 `ENG-123` 格式导入或重新拉取。
 
-也可通过 `ANTUMI_LINEAR_TOKEN` 配置凭据。Token 由 Antumi 单独保存，不写入筛选设置或原文快照。当前版本只读取 Linear，不修改远端事项；当前插件不下载附件。
+也可通过 `ANTUMI_LINEAR_TOKEN` 配置凭据。Token 由 Antumi 单独保存，不写入筛选设置或原文快照。插件不下载附件。
+
+## 回写
+
+在任务页的来源区块可以把进展写回 Linear 事项：
+
+- **改状态**：列出事项所在团队的工作流状态（不含当前状态和「Duplicate」类状态，后者需要先在 Linear 里关联重复事项）。
+- **写评论**：Markdown 原样发出，Linear 直接渲染。重试同一次写入不会发出重复评论。
+
+写入需要 API Key 有 **Write** 权限。只有 Read 权限的旧 Key 照常同步，但回写会提示「没有写权限」；到 Linear 新建一个带 Write 权限的 Key，在「设置 → 集成 → Linear」重新登录即可。评论以 API Key 所属账号的身份发出。
 
 ## 独立开发
 
-要求 Node >=22.13。仓库包含打包好的 SDK（`../../vendor/antumi-plugin-sdk-0.1.0.tgz`），无需克隆 Antumi，无需等待 SDK 的 npm 首次发布：
+要求 Node >=22.13。仓库包含打包好的 SDK（`../../vendor/antumi-plugin-sdk-0.5.0.tgz`），无需克隆 Antumi，无需等待 SDK 的 npm 首次发布：
 
 ```sh
 # 在仓库根目录安装
@@ -29,7 +38,7 @@ npm run check --workspace antumi-plugin-linear
 ```text
 dist/plugin/manifest.json
 dist/plugin/main.mjs
-dist/antumi-plugin-linear-0.1.0.zip
+dist/antumi-plugin-linear-0.3.0.zip
 ```
 
 ZIP 内已包含 SDK 和运行时依赖，安装时不需要 Node 或 npm。SDK 正式发布到 npm 后，可把 file 依赖改为发布版本并更新 package-lock.json；构建产物格式不变。
