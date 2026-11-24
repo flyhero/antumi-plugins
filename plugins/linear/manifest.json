@@ -1,10 +1,11 @@
 {
   "id": "antumi.linear",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "engines": { "antumi": ">=0.15.11 <1.0.0" },
   "contributes": {
     "sources": [{
       "id": "linear", "commentSync": 1, "writeback": 1, "name": "Linear",
+      "writebackRules": {"start": {"presets": [{"value": "In Progress", "label": "In Progress"}], "placeholder": "In Progress"}, "review": {"placeholder": "In Review", "hint": "Linear 默认工作流没有 In Review，团队加了这个状态才填。", "translations": {"en": {"hint": "Linear's default workflow has no In Review; fill it in only if your team added that status."}}}, "done": {"presets": [{"value": "Done", "label": "Done"}], "placeholder": "Done"}},
       "settings": [
         { "key": "team", "type": "text", "label": "团队标识", "required": false, "placeholder": "ENG", "hint": "留空同步所有可访问团队；填写团队的短标识。", "translations": { "en": { "label": "Team key", "hint": "Leave empty for all accessible teams, or enter a team key." } } },
         { "key": "project", "type": "text", "label": "项目 ID", "required": false, "hint": "可选，填写 Linear 项目的 UUID。", "translations": { "en": { "label": "Project ID", "hint": "Optional Linear project UUID." } } },

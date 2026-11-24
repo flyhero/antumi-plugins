@@ -21,6 +21,8 @@
 - **改状态**：列出事项所在团队的工作流状态（不含当前状态和「Duplicate」类状态，后者需要先在 Linear 里关联重复事项）。
 - **写评论**：Markdown 原样发出，Linear 直接渲染。重试同一次写入不会发出重复评论。
 
+「设置 → 集成 → Linear → 回写」预设了 Linear [默认工作流](https://linear.app/docs/configuring-workflows)的 In Progress 和 Done；默认工作流没有 In Review，团队加了才在提交验收里填。改过状态名的，选「自己填…」。
+
 写入需要 API Key 有 **Write** 权限。只有 Read 权限的旧 Key 照常同步，但回写会提示「没有写权限」；到 Linear 新建一个带 Write 权限的 Key，在「设置 → 集成 → Linear」重新登录即可。评论以 API Key 所属账号的身份发出。
 
 ## 独立开发
