@@ -1,6 +1,6 @@
 # 更新日志
 
-## 1.3.0（未发布）
+## 1.3.0
 
 - 用上 GitHub Issue 状态（预览）的仓库，回写可以把 Issue 改为 In progress、In review、Done 等状态。
 - 「设置 → 集成 → GitHub → 回写」改为从下拉框选状态：In progress、In review、完成。
