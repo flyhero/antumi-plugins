@@ -1,6 +1,6 @@
 {
   "id": "antumi.tapd",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "engines": {
     "antumi": ">=0.15.11 <1.0.0"
   },
@@ -9,6 +9,7 @@
       {
         "id": "tapd",
         "commentSync": 1,
+        "writeback": 1,
         "name": "TAPD",
         "settings": [
           {

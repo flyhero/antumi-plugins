@@ -48,6 +48,18 @@ export function tapdSource(connect = (key: string) => new TapdClient(key)): Sour
     comments(settings, credential, key, signal, options) {
       const { kind, id } = parseKey(key)
       return connect(token(credential)).commentChanges(parseWorkspace(settings.workspace ?? ''), kind, id, signal, options)
+    },
+    transitions(settings, credential, key, signal) {
+      const { kind, id } = parseKey(key)
+      return connect(token(credential)).transitions(parseWorkspace(settings.workspace ?? ''), kind, id, signal)
+    },
+    transition(settings, credential, key, target, signal) {
+      const { kind, id } = parseKey(key)
+      return connect(token(credential)).transition(parseWorkspace(settings.workspace ?? ''), kind, id, target, signal)
+    },
+    comment(settings, credential, key, { markdown }, signal) {
+      const { kind, id } = parseKey(key)
+      return connect(token(credential)).comment(parseWorkspace(settings.workspace ?? ''), kind, id, markdown, signal)
     }
   }
 }

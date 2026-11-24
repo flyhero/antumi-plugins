@@ -242,3 +242,134 @@ describe('TAPD requests', () => {
     await expect(numeric.client.issue(ws, 'story', storyId, signal)).rejects.toMatchObject({ code: 'request-failed' })
   })
 })
+
+describe('TAPD writeback', () => {
+  const form = (call: { init: RequestInit | undefined } | undefined) => Object.fromEntries(call?.init?.body instanceof URLSearchParams ? call.init.body : [])
+  // all_transitions as documented: one rule per move between status keys, including staying put.
+  const workflow = {
+    ...routes,
+    '/workflows/all_transitions': () => ok([
+      { Name: 'planning-planning', StepPrevious: 'planning', StepNext: 'planning' },
+      { Name: 'planning-developing', StepPrevious: 'planning', StepNext: 'developing' },
+      { Name: 'planning-status_3', StepPrevious: 'planning', StepNext: 'status_3' },
+      { Name: 'planning-status_7', StepPrevious: 'planning', StepNext: 'status_7' },
+      { Name: 'developing-planning', StepPrevious: 'developing', StepNext: 'planning' }
+    ])
+  }
+
+  it('lists the moves the workflow allows from the current status, named and sorted into categories', async () => {
+    const { calls, client } = server({ ...workflow, '/stories': () => ok([story(storyId, { status: 'planning', workitem_type_id: '1120003271000000001' })]) })
+    const result = await tapdSource(() => client).transitions?.({ workspace: ws }, { kind: 'token', payload: { token } }, `story-${storyId}`, signal)
+    expect(result).toEqual({
+      status: '规划中', statusCategory: 'todo',
+      options: [
+        { id: 'developing', name: '实现中', category: 'doing' },
+        { id: 'status_3', name: '已上线', category: 'done' },
+        { id: 'status_7', name: 'status_7', category: 'unknown' }
+      ]
+    })
+    // The story's category picks its workflow.
+    for (const path of ['/workflows/all_transitions', '/workflows/status_map']) {
+      expect(Object.fromEntries(calls.find((call) => call.path === path)?.params ?? [])).toEqual({ workspace_id: ws, system: 'story', workitem_type_id: '1120003271000000001' })
+    }
+  })
+
+  it('offers the other fixed statuses for a task', async () => {
+    const { calls, client } = server({ ...routes, '/tasks': () => ok([{ Task: { id: '42', name: 'T', status: 'progressing' } }]) })
+    expect(await client.transitions(ws, 'task', '42', signal)).toEqual({
+      status: '进行中', statusCategory: 'doing',
+      options: [{ id: 'open', name: '未开始', category: 'todo' }, { id: 'done', name: '已完成', category: 'done' }]
+    })
+    expect(calls.some((call) => call.path.startsWith('/workflows'))).toBe(false)
+  })
+
+  it('moves a bug by its status key and reports where it landed', async () => {
+    const { calls, client } = server({
+      ...routes,
+      '/workflows/all_transitions': () => ok([{ Name: 'new-resolved', StepPrevious: 'new', StepNext: 'resolved' }]),
+      '/workflows/status_map': () => ok({ new: '新', resolved: '已解决' }),
+      '/workflows/last_steps': () => ok({ resolved: '已解决' }),
+      '/bugs': (params) => params.get('id') ? ok([{ Bug: { id: '11', title: 'Crash', status: 'new' } }]) : ok({ Bug: { id: '11', title: 'Crash', status: 'resolved' } })
+    })
+    expect(await client.transition(ws, 'bug', '11', 'resolved', signal)).toEqual({ status: '已解决', statusCategory: 'done' })
+    const write = calls.find((call) => call.init?.method === 'POST')
+    expect(write?.path).toBe('/bugs')
+    expect([...write?.params ?? []]).toEqual([])
+    expect(form(write)).toEqual({ workspace_id: ws, id: '11', status: 'resolved', current_user: 'ann' })
+    expect(write?.init).toMatchObject({ redirect: 'error', headers: { Authorization: `Bearer ${token}` } })
+  })
+
+  it('reads the status back when the update does not return it', async () => {
+    let updated = false
+    const { client } = server({
+      ...routes,
+      '/tasks': (params) => params.get('id') ? ok([{ Task: { id: '42', name: 'T', status: updated ? 'done' : 'open' } }]) : (updated = true, ok(null))
+    })
+    expect(await client.transition(ws, 'task', '42', 'done', signal)).toEqual({ status: '已完成', statusCategory: 'done' })
+  })
+
+  it('refuses a move the workflow does not allow now, without writing', async () => {
+    const { calls, client } = server({ ...workflow, '/stories': () => ok([story(storyId, { status: 'developing' })]) })
+    for (const target of ['status_3', 'developing', 'x'.repeat(600)]) {
+      await expect(client.transition(ws, 'story', storyId, target, signal)).rejects.toMatchObject({ code: 'request-failed', message: expect.stringContaining('不能流转') })
+    }
+    expect(calls.some((call) => call.init?.method === 'POST')).toBe(false)
+  })
+
+  it('posts a comment as HTML and returns the id comment sync reads back', async () => {
+    const { calls, client } = server({
+      ...routes,
+      '/stories': () => ok([story(storyId)]),
+      '/comments': (params) => params.get('entry_id')
+        ? ok([{ Comment: { id: '1120003271000000501', description: '<p>Done</p>', author: 'ann', created: '2026-11-24 10:00:00' } }])
+        : ok({ Comment: { id: '1120003271000000501', description: '<p>Done</p>', author: 'ann', entry_type: 'stories', entry_id: storyId, created: '2026-11-24 10:00:00' } })
+    })
+    const source = tapdSource(() => client)
+    const posted = await source.comment?.({ workspace: ws }, { kind: 'token', payload: { token } }, `story-${storyId}`, { markdown: '修好了，见 [PR #3](https://github.com/a/b/pull/3)。\n\n- 改了 `login.ts`\n- 加了测试', writeId: crypto.randomUUID() }, signal)
+    const synced = await client.commentChanges(ws, 'story', storyId, signal, { checkpoint: { createdAt: 0, ids: [] }, continuation: null })
+    expect(posted).toEqual({ id: synced.comments[0]?.id, url: `https://www.tapd.cn/${ws}/prong/stories/view/${storyId}` })
+    const write = calls.find((call) => call.init?.method === 'POST')
+    expect(form(write)).toEqual({
+      workspace_id: ws, entry_type: 'stories', entry_id: storyId, author: 'ann',
+      description: '<p>修好了，见 <a href="https://github.com/a/b/pull/3">PR #3</a>。</p><ul><li>改了 <code>login.ts</code></li><li>加了测试</li></ul>'
+    })
+  })
+
+  it('posts bug comments as bug comments and reports a missing item', async () => {
+    const { calls, client } = server({ ...routes, '/bugs': () => ok([]), '/comments': () => ok({ Comment: { id: '1' } }) })
+    await expect(client.comment(ws, 'bug', '11', 'hi', signal)).rejects.toMatchObject({ code: 'not-found' })
+    expect(calls.some((call) => call.init?.method === 'POST')).toBe(false)
+    const bug = server({ ...routes, '/bugs': () => ok([{ Bug: { id: '11', title: 'Crash', status: 'new' } }]), '/comments': () => ok({ Comment: { id: '9' } }) })
+    expect(await bug.client.comment(ws, 'bug', '11', 'hi', signal)).toEqual({ id: '9', url: `https://www.tapd.cn/${ws}/bugtrace/bugs/view/11` })
+    expect(form(bug.calls.find((call) => call.init?.method === 'POST'))).toMatchObject({ entry_type: 'bug', description: '<p>hi</p>' })
+  })
+
+  it('asks for a token with write permission when TAPD refuses the write', async () => {
+    // What TAPD answers an account without the project permission (reported by tapd-in-dsh).
+    const refuse = () => Response.json({ status: 403, data: '', info: "user 1 doesn't have permission comments::add of workspace 20003271" }, { status: 403 })
+    const { client } = server({ ...routes, '/stories': () => ok([story(storyId)]), '/comments': refuse })
+    const failure = await client.comment(ws, 'story', storyId, 'hi', signal).catch((error: unknown) => error)
+    expect(failure).toMatchObject({ code: 'forbidden', message: expect.stringMatching(/写入权限.*添加评论.*重新登录/) })
+    expect(String(failure instanceof Error ? failure.message : '')).not.toContain(token)
+    const story403 = server({ ...routes, '/tasks': (params) => params.get('id') ? ok([{ Task: { id: '42', status: 'open' } }]) : Response.json({ status: 403, info: 'no', data: '' }) })
+    await expect(story403.client.transition(ws, 'task', '42', 'done', signal)).rejects.toMatchObject({ code: 'forbidden', message: expect.stringContaining('编辑任务') })
+  })
+
+  it('does not resend a write after a server error', async () => {
+    const { fetcher, client } = server({ ...routes, '/stories': () => ok([story(storyId)]), '/comments': () => new Response(null, { status: 502 }) })
+    await expect(client.comment(ws, 'story', storyId, 'hi', signal)).rejects.toMatchObject({ code: 'request-failed' })
+    expect(fetcher.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1)
+  })
+})
+
+describe('Markdown to TAPD HTML', () => {
+  it('keeps paragraphs, line breaks, lists, links and code, escaping everything else', async () => {
+    const { markdownToHtml } = await import('./tapd-html.js')
+    expect(markdownToHtml('第一行\n第二行\n\n## 结果\n1. 一\n2. **二** <b>\n\n> 引用')).toBe(
+      '<p>第一行<br>第二行</p><h2>结果</h2><ol><li>一</li><li><strong>二</strong> &lt;b&gt;</li></ol><blockquote><p>引用</p></blockquote>')
+    expect(markdownToHtml('```ts\nif (a < b) "x"\n```\n见 https://x.test/a?b=1&c=2。')).toBe(
+      '<pre><code>if (a &lt; b) &quot;x&quot;</code></pre><p>见 <a href="https://x.test/a?b=1&amp;c=2">https://x.test/a?b=1&amp;c=2</a>。</p>')
+    expect(markdownToHtml('[x](javascript:alert(1)) <img src=x onerror=alert(1)>')).toBe('<p>[x](javascript:alert(1)) &lt;img src=x onerror=alert(1)&gt;</p>')
+    expect(markdownToHtml('`<a href="x">`')).toBe('<p><code>&lt;a href=&quot;x&quot;&gt;</code></p>')
+  })
+})
