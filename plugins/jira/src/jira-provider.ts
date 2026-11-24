@@ -1,6 +1,7 @@
 import { MAX_ATTACHMENT_BYTES, MAX_TASK_IMAGES } from '@antumi/plugin-sdk'
 import { JiraClient, normalizeSite, type JiraApi, type JiraAttachment, type JiraCredentials, type JiraIssue } from './jira-client.js'
 import { issueSnapshot, isImageAttachment, type ImageOutcome } from './jira-snapshot.js'
+import { markdownToAdf } from './markdown-adf.js'
 import { SourceError } from '@antumi/plugin-sdk'
 import type { SourceCredential, SourcePlugin, SourceSettings } from '@antumi/plugin-sdk'
 
@@ -58,6 +59,12 @@ async function downloadImages(api: JiraApi, issue: JiraIssue, signal: AbortSigna
   return { images, outcomes }
 }
 
+function writable(api: JiraApi): Required<Pick<JiraApi, 'transitions' | 'transition' | 'addComment'>> {
+  const { transitions, transition, addComment } = api
+  if (!transitions || !transition || !addComment) throw new SourceError('request-failed', '这个 Jira 连接不支持回写。')
+  return { transitions: transitions.bind(api), transition: transition.bind(api), addComment: addComment.bind(api) }
+}
+
 function jiraCredentials(settings: SourceSettings, credential: SourceCredential): JiraCredentials {
   const { email, token } = credential.payload
   if (credential.kind !== 'basic' || !email || !token) {
@@ -109,10 +116,10 @@ export function jiraProvider(connect: (credentials: JiraCredentials) => JiraApi 
         ).trim()
         const token = (
           await session.prompt({
-            translations: { en: { hint: 'Read permission is enough. Your token stays on this computer and is never shared with Agents.' } },
+            translations: { en: { hint: 'Read permission is enough for syncing; changing status and posting comments need write permission (write:jira-work for a scoped token). Your token stays on this computer and is never shared with Agents.' } },
             kind: 'secret',
             label: 'API token',
-            hint: '只需要读权限。token 只保存在本机，不会交给 Agent。',
+            hint: '同步只需要读权限；在 Antumi 里改状态、发评论需要写权限（带权限范围的 token 要有 write:jira-work）。token 只保存在本机，不会交给 Agent。',
             link: { url: TOKEN_PAGE, label: '在 Atlassian 账号设置里创建', translations: { en: { label: 'Create in Atlassian account settings' } } }
           })
         ).trim()
@@ -138,6 +145,16 @@ export function jiraProvider(connect: (credentials: JiraCredentials) => JiraApi 
       const bytes = await client(jiraCredentials(settings, credential)).download(id, MAX_ATTACHMENT_BYTES, AbortSignal.any([signal, AbortSignal.timeout(IMAGE_TIMEOUT_MS)]))
       return { name: '', bytes }
     },
+
+    transitions: (settings, credential, key, signal) => writable(client(jiraCredentials(settings, credential))).transitions(key, signal),
+    transition: (settings, credential, key, id, signal) => writable(client(jiraCredentials(settings, credential))).transition(key, id, signal),
+    // Jira has no client-supplied comment id, so writeId has nowhere to go.
+    async comment(settings, credential, key, { markdown }, signal) {
+      const body = markdownToAdf(markdown)
+      if (!body.content.length) throw new SourceError('request-failed', '评论内容为空，没有发送。')
+      return writable(client(jiraCredentials(settings, credential))).addComment(key, body, signal)
+    },
+
     list: (settings, credential, signal) => client(jiraCredentials(settings, credential)).search(settings.jql ?? DEFAULT_JIRA_JQL, signal),
 
     // The raw fields ride along; core keeps only what the issue schema names. Asked for the text

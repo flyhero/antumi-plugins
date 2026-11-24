@@ -2,7 +2,8 @@ import { z } from 'zod'
 import { commentState, commentPage, SourceComment, type SourceCommentState, type SourceCommentOptions, type SourceCommentPage } from '@antumi/plugin-sdk'
 import { adfToMarkdown, escapeLinkText } from './jira-adf.js'
 import { isImageAttachment } from './jira-snapshot.js'
-import { ISSUE_STATUS_CATEGORIES, MAX_TASK_IMAGES, type SourceIssue } from '@antumi/plugin-sdk'
+import { ISSUE_STATUS_CATEGORIES, MAX_TASK_IMAGES, type SourceCommentResult, type SourceIssue, type SourceStatusResult, type SourceTransitions } from '@antumi/plugin-sdk'
+import type { AdfDocument } from './markdown-adf.js'
 import { SourceError } from '@antumi/plugin-sdk'
 
 export type JiraCredentials = { site: string; email: string; token: string }
@@ -25,6 +26,11 @@ export type JiraApi = {
   issue(key: string, signal: AbortSignal): Promise<JiraIssue>
   // An attachment's bytes, at most `limit` of them; what they are is for the caller to check.
   download(attachmentId: string, limit: number, signal: AbortSignal): Promise<Uint8Array>
+  // Writing back: the issue's status and the transitions open to it now, a move by transition id,
+  // and a comment.
+  transitions?(key: string, signal: AbortSignal): Promise<SourceTransitions>
+  transition?(key: string, id: string, signal: AbortSignal): Promise<SourceStatusResult>
+  addComment?(key: string, body: AdfDocument, signal: AbortSignal): Promise<SourceCommentResult>
 }
 
 // Jira's own key format; anything else in a reply is dropped before it can reach a URL.
@@ -101,6 +107,27 @@ const CommentPage = z.object({
 })
 const TenantInfo = z.object({ cloudId: z.string() })
 const ErrorBody = z.object({ errorMessages: z.array(z.string()).optional() })
+const StatusRow = Named.extend({ id: z.union([z.string(), z.number()]).transform(String).nullish(), statusCategory: z.object({ key: z.string() }).nullish() })
+const IssueStatus = z.object({ key: z.string(), fields: z.object({ status: StatusRow.nullish() }) })
+const TransitionList = z.object({
+  transitions: z.array(
+    z.object({
+      id: z.union([z.string(), z.number()]).transform(String),
+      name: z.string().catch(''),
+      isAvailable: z.boolean().nullish(),
+      to: StatusRow.nullish()
+    })
+  )
+})
+const CreatedComment = z.object({ id: z.union([z.string(), z.number()]).transform(String) })
+// What Jira says when a write is refused; the fields map holds a message per field it wanted.
+const WriteErrorBody = z.object({
+  errorMessages: z.array(z.string()).catch([]),
+  errors: z.record(z.string(), z.string()).catch({}),
+  message: z.string().catch('')
+})
+const MAX_OPTIONS = 100
+const WRITE_TOKEN_HINT = '请用有写权限的 API token 重新登录（带权限范围的 token 需要 write:jira-work）'
 
 // A reply of the wrong shape means the address is not a Jira REST API.
 function parse<T>(schema: z.ZodType<T>, value: unknown): T {
@@ -163,6 +190,16 @@ const CATEGORY: Record<string, (typeof ISSUE_STATUS_CATEGORIES)[number]> = {
   done: 'done'
 }
 
+function statusOf(status: z.infer<typeof StatusRow> | null | undefined): SourceStatusResult {
+  return { status: (status?.name ?? '').slice(0, 100), statusCategory: CATEGORY[status?.statusCategory?.key ?? ''] ?? 'unknown' }
+}
+
+// Jira's own words go along, shortened: they say which permission or field it wanted.
+function brief(parts: readonly string[]): string {
+  const text = parts.map((part) => part.trim()).filter(Boolean).join('；').replace(/\s+/g, ' ')
+  return text.length > 200 ? `${text.slice(0, 200)}…` : text
+}
+
 function summarize(site: string, row: z.infer<typeof IssueRow>): SourceIssue | null {
   if (!JIRA_KEY_PATTERN.test(row.key)) {
     return null
@@ -200,6 +237,44 @@ async function failure(response: Response): Promise<SourceError> {
       return new SourceError('not-found', message)
     default:
       return new SourceError('request-failed', message)
+  }
+}
+
+type WriteKind = 'transition' | 'comment'
+type Write = { method: 'POST'; body: unknown }
+
+// A refused write, in words that say what to do. A scoped token without write:jira-work is turned
+// down by the gateway with 401 "scope does not match"; a missing project permission is 403, or 400
+// on a transition.
+async function writeFailure(response: Response, kind: WriteKind, key: string): Promise<SourceError> {
+  let body: z.infer<typeof WriteErrorBody> = { errorMessages: [], errors: {}, message: '' }
+  try {
+    body = WriteErrorBody.parse(JSON.parse(await readText(response, MAX_ERROR_BYTES)))
+  } catch {
+    // Not Jira's JSON: the status code alone has to do.
+  }
+  const said = brief([...body.errorMessages, body.message])
+  const fields = brief(Object.values(body.errors))
+  const suffix = (text: string) => (text ? `（Jira：${text}）` : '')
+  const action = kind === 'transition' ? '修改这个事项的状态' : '在这个事项下发评论'
+  const forbidden = new SourceError('forbidden', `没有权限${action}：${WRITE_TOKEN_HINT}，并确认你在 Jira 项目里有 ${kind === 'transition' ? 'Transition Issues' : 'Add Comments'} 权限。${suffix(said)}`)
+  switch (response.status) {
+    case 401:
+      return /scope/i.test(said) ? forbidden : new SourceError('auth-failed', `Jira 不接受当前的 API token，请重新登录。${suffix(said)}`)
+    case 403:
+      return forbidden
+    case 404:
+      return new SourceError('not-found', `在 Jira 里找不到 ${key}，或者当前账号看不到它。`)
+    case 400:
+      if (/permission/i.test(said)) return forbidden
+      if (kind === 'transition' && fields) return new SourceError('request-failed', `流转到这个状态需要先填写字段，请到 Jira 里操作。${suffix(fields)}`)
+      return new SourceError('request-failed', `Jira 拒绝了这次${kind === 'transition' ? '状态修改' : '评论'}。${suffix(said || fields)}`)
+    case 409:
+      return new SourceError('request-failed', `${key} 刚被别人修改过，请稍后重试。`)
+    case 413:
+      return new SourceError('request-failed', `评论太长，或者 ${key} 的评论数已达到 Jira 的上限。`)
+    default:
+      return new SourceError('request-failed', `Jira 回复 ${response.status}，没有${action}。`)
   }
 }
 
@@ -301,6 +376,55 @@ export class JiraClient implements JiraApi {
     return commentPage(comments, options)
   }
 
+  // The transitions open to the issue now, as Jira lists them for this user; one leading back to the
+  // current status (a self loop) is not a move.
+  async transitions(key: string, signal: AbortSignal): Promise<SourceTransitions> {
+    const current = await this.status(key, signal)
+    const path = `/rest/api/3/issue/${encodeURIComponent(key)}/transitions`
+    const { transitions } = parse(TransitionList, await this.get(path, signal))
+    const options = transitions.flatMap((transition) => {
+      const to = transition.to
+      const name = (to?.name ?? '').trim().slice(0, 100)
+      const id = transition.id.slice(0, 500)
+      const here = to?.id && current.id ? to.id === current.id : name === current.status
+      if (transition.isAvailable === false || !id || !name || here) return []
+      const action = transition.name.trim().slice(0, 100)
+      return [{ id, name, ...(action && action.toLowerCase() !== name.toLowerCase() ? { action } : {}), category: statusOf(to).statusCategory }]
+    })
+    return { status: current.status, statusCategory: current.statusCategory, options: options.slice(0, MAX_OPTIONS) }
+  }
+
+  // Only a transition Jira offers right now: an id from an older list would fail with a vaguer 400.
+  async transition(key: string, id: string, signal: AbortSignal): Promise<SourceStatusResult> {
+    const { options } = await this.transitions(key, signal)
+    const option = options.find((candidate) => candidate.id === id)
+    if (!option) {
+      throw new SourceError('request-failed', `${key} 现在不能这样流转，状态可能已在 Jira 里被改过，请刷新后重选。`)
+    }
+    const path = `/rest/api/3/issue/${encodeURIComponent(key)}/transitions`
+    const response = await this.send(path, signal, 'application/json', { method: 'POST', body: { transition: { id } } }, (failed) => writeFailure(failed, 'transition', key))
+    await response.body?.cancel()
+    // Post functions may move it on again; what Jira holds afterwards is the answer.
+    const { status, statusCategory } = await this.status(key, signal)
+    return { status, statusCategory }
+  }
+
+  async addComment(key: string, body: AdfDocument, signal: AbortSignal): Promise<SourceCommentResult> {
+    if (!JIRA_KEY_PATTERN.test(key)) throw new SourceError('not-found', `${key} 不是 Jira 事项编号`)
+    const path = `/rest/api/3/issue/${encodeURIComponent(key)}/comment`
+    const response = await this.send(path, signal, 'application/json', { method: 'POST', body: { body } }, (failed) => writeFailure(failed, 'comment', key))
+    const { id } = parse(CreatedComment, await readJson(response))
+    // The same id and link comment sync gives this comment, so Antumi knows it for its own.
+    return { id, url: `${this.credentials.site}/browse/${encodeURIComponent(key)}?focusedCommentId=${encodeURIComponent(id)}` }
+  }
+
+  private async status(key: string, signal: AbortSignal): Promise<SourceStatusResult & { id: string | null }> {
+    if (!JIRA_KEY_PATTERN.test(key)) throw new SourceError('not-found', `${key} 不是 Jira 事项编号`)
+    const query = new URLSearchParams({ fields: 'status' })
+    const row = parse(IssueStatus, await this.get(`/rest/api/3/issue/${encodeURIComponent(key)}?${query}`, signal))
+    return { ...statusOf(row.fields.status), id: row.fields.status?.id ?? null }
+  }
+
   // Straight from the site, never through a redirect: the token must not follow one elsewhere.
   async download(attachmentId: string, limit: number, signal: AbortSignal): Promise<Uint8Array> {
     if (!/^\d+$/.test(attachmentId)) {
@@ -314,21 +438,22 @@ export class JiraClient implements JiraApi {
     return readJson(await this.send(pathAndQuery, signal, 'application/json'))
   }
 
-  // One successful response, trying the gateway once if the site turns the token down.
-  private async send(pathAndQuery: string, signal: AbortSignal, accept: string): Promise<Response> {
-    const response = await this.request(`${this.base}${pathAndQuery}`, signal, accept)
+  // One successful response, trying the gateway once if the site turns the token down. A write is
+  // safe to repeat there: a 401 means the site did nothing.
+  private async send(pathAndQuery: string, signal: AbortSignal, accept: string, write?: Write, fail: (response: Response) => Promise<SourceError> = failure): Promise<Response> {
+    const response = await this.request(`${this.base}${pathAndQuery}`, signal, accept, true, write)
     const gateway = response.status === 401 && this.base === this.credentials.site ? await this.gateway(signal) : null
     if (gateway) {
       await response.body?.cancel()
-      const retried = await this.request(`${gateway}${pathAndQuery}`, signal, accept)
+      const retried = await this.request(`${gateway}${pathAndQuery}`, signal, accept, true, write)
       if (!retried.ok) {
-        throw await failure(retried)
+        throw await fail(retried)
       }
       this.base = gateway
       return retried
     }
     if (!response.ok) {
-      throw await failure(response)
+      throw await fail(response)
     }
     return response
   }
@@ -352,14 +477,18 @@ export class JiraClient implements JiraApi {
     }
   }
 
-  private async request(url: string, signal: AbortSignal, accept: string, authorized: boolean = true): Promise<Response> {
+  private async request(url: string, signal: AbortSignal, accept: string, authorized: boolean = true, write?: Write): Promise<Response> {
     const { email, token } = this.credentials
     const headers: Record<string, string> = { Accept: accept }
     if (authorized) {
       headers.Authorization = `Basic ${Buffer.from(`${email}:${token}`).toString('base64')}`
     }
+    if (write) {
+      headers['Content-Type'] = 'application/json'
+    }
     try {
       return await this.fetchImpl(url, {
+        ...(write ? { method: write.method, body: JSON.stringify(write.body) } : {}),
         headers,
         signal: AbortSignal.any([signal, AbortSignal.timeout(TIMEOUT_MS)]),
         redirect: 'error'
