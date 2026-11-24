@@ -3,8 +3,10 @@ import { z } from 'zod'
 import TurndownService from 'turndown'
 import {
   commentPage, commentState, MAX_ISSUE_TITLE_LENGTH, MAX_SNAPSHOT_LENGTH, SourceComment, SourceError,
-  type SourceCommentOptions, type SourceCommentPage, type SourceIssue, type SourceIssueDetail, type SourceSettings
+  type SourceCommentOptions, type SourceCommentPage, type SourceCommentResult, type SourceIssue, type SourceIssueDetail, type SourceSettings,
+  type SourceStatusResult, type SourceTransitions
 } from '@antumi/plugin-sdk'
+import { markdownToHtml } from './tapd-html.js'
 import { category, priorityName, TASK_LAST_STEPS, TASK_STATUSES, typeName } from './tapd-status.js'
 import { API, itemKey, itemUrl, parseWorkspaces, WEB, type ItemKind } from './tapd-url.js'
 
@@ -15,7 +17,7 @@ const Envelope = z.object({ status: z.coerce.number(), info: z.string().nullish(
 const Meta = z.object({ meta: z.object({ request_id: z.string().regex(/^[A-Za-z0-9-]{1,64}$/) }) })
 const Item = z.object({
   id: Id, name: Text, title: Text, status: Text, owner: Text, current_owner: Text, creator: Text, reporter: Text,
-  priority: Text, priority_label: Text, created: Text, modified: Text, description: z.string().nullish()
+  priority: Text, priority_label: Text, created: Text, modified: Text, description: z.string().nullish(), workitem_type_id: Text
 })
 const Comment = z.object({ id: Id, description: Text, author: Text, created: Text, modified: Text })
 const Attachment = z.object({ id: Id, filename: Text })
@@ -23,8 +25,20 @@ const User = z.object({ nick: z.string().min(1), name: Text })
 const Workspace = z.object({ Workspace: z.object({ id: Text, name: Text, category: Text }) })
 // PHP sends an empty map as [].
 const Names = z.union([z.record(z.string(), z.string()), z.array(z.never()).transform(() => ({}))])
+// A workflow's rule for one move between status keys; parallel workflows add steps this ignores.
+const Step = z.object({ StepPrevious: Text, StepNext: Text })
+// Documented bare; rows elsewhere come wrapped in their model's name, so either is read.
+function step(row: unknown): z.infer<typeof Step> | null {
+  const bare = Step.safeParse(row)
+  if (bare.success && bare.data.StepNext) return bare.data
+  const wrapped = z.record(z.string(), Step).safeParse(row)
+  return wrapped.success ? Object.values(wrapped.data)[0] ?? null : null
+}
+const Posted = z.union([z.object({ Comment: z.object({ id: Id }) }).transform((value) => value.Comment.id), z.object({ id: Id }).transform((value) => value.id)])
 const wrapper: Record<ItemKind, string> = { story: 'Story', bug: 'Bug', task: 'Task' }
 const commentTypes: Record<ItemKind, readonly string[]> = { story: ['stories'], bug: ['bug', 'bug_remark'], task: ['tasks'] }
+const paths: Record<ItemKind, string> = { story: '/stories', bug: '/bugs', task: '/tasks' }
+const writeScope: Record<ItemKind, string> = { story: '编辑需求', bug: '编辑缺陷', task: '编辑任务' }
 const RETRY = new Set([429, 500, 502, 503])
 const DELAYS = [1000, 3000]
 const MAX_BYTES = 5 * 1024 * 1024
@@ -33,6 +47,8 @@ const PAGE = 200
 type Item = z.infer<typeof Item>
 type Wait = (ms: number, signal: AbortSignal) => Promise<void>
 type Space = { id: string, name: string, lightweight: boolean }
+type Statuses = { names: Readonly<Record<string, string>>, lastSteps: ReadonlySet<string> | null }
+type Moves = SourceTransitions & { statuses: Statuses }
 
 const markdown = new TurndownService({ headingStyle: 'atx', codeBlockStyle: 'fenced' })
 markdown.remove(['script', 'style', 'iframe'])
@@ -155,12 +171,67 @@ export class TapdClient {
     return commentPage(await this.comments(workspace, kind, id, itemUrl(workspace, kind, id, space.lightweight), signal), options)
   }
 
-  private summary(kind: ItemKind, item: Item, space: Space, statuses: { names: Readonly<Record<string, string>>, lastSteps: ReadonlySet<string> | null }, labelProject: boolean): SourceIssue {
+  async transitions(workspace: string, kind: ItemKind, id: string, signal: AbortSignal): Promise<SourceTransitions> {
+    const { status, statusCategory, options } = await this.moves(workspace, kind, id, signal)
+    return { status, statusCategory, options }
+  }
+
+  // The option's id is the target status key; it is checked against the workflow read just now.
+  async transition(workspace: string, kind: ItemKind, id: string, target: string, signal: AbortSignal): Promise<SourceStatusResult> {
+    const moves = await this.moves(workspace, kind, id, signal)
+    if (!moves.options.some((option) => option.id === target)) throw new SourceError('request-failed', `这个${typeName[kind]}现在不能流转到所选状态，请刷新后重新选择`)
+    const user = await this.user(signal)
+    const data = await this.post(paths[kind], { workspace_id: workspace, id, status: target, current_user: user.nick }, writeScope[kind], signal)
+    const row = Item.safeParse(z.record(z.string(), z.unknown()).safeParse(data).data?.[wrapper[kind]])
+    const after = row.success && row.data.id === id && row.data.status ? row.data : await this.item(workspace, kind, id, signal)
+    return this.status(after.status, moves.statuses)
+  }
+
+  // TAPD takes no client-supplied id, so writeId has nowhere to go and a resent comment would be a second one.
+  async comment(workspace: string, kind: ItemKind, id: string, text: string, signal: AbortSignal): Promise<SourceCommentResult> {
+    const description = markdownToHtml(text)
+    if (!description) throw new SourceError('request-failed', '评论内容不能为空')
+    await this.item(workspace, kind, id, signal)
+    const space = await this.workspace(workspace, signal)
+    const user = await this.user(signal)
+    const data = await this.post('/comments', {
+      workspace_id: workspace, entry_type: commentTypes[kind][0] ?? '', entry_id: id, author: user.nick, description
+    }, '添加评论', signal)
+    // The same id comment sync reads back, so Antumi knows the comment as its own.
+    const posted = Posted.safeParse(data)
+    if (!posted.success) throw new SourceError('request-failed', 'TAPD 没有返回新评论的编号，评论可能已经发出，请在 TAPD 上查看')
+    return { id: posted.data, url: itemUrl(workspace, kind, id, space.lightweight) }
+  }
+
+  private async moves(workspace: string, kind: ItemKind, id: string, signal: AbortSignal): Promise<Moves> {
+    const item = await this.item(workspace, kind, id, signal)
+    const statuses = await this.statuses(workspace, kind, signal, item.workitem_type_id)
+    let targets: string[] = Object.keys(TASK_STATUSES)
+    if (kind !== 'task') {
+      const query = { workspace_id: workspace, system: kind, ...(kind === 'story' && item.workitem_type_id ? { workitem_type_id: item.workitem_type_id } : {}) }
+      const steps = parse(z.array(z.unknown()), await this.get('/workflows/all_transitions', query, signal)).map(step)
+      targets = steps.filter((rule) => rule?.StepPrevious === item.status).map((rule) => rule?.StepNext ?? '')
+    }
+    const options = [...new Set(targets)]
+      .filter((key) => key && key !== item.status && key.length <= 500)
+      .slice(0, 100)
+      .map((key) => {
+        const { status, statusCategory } = this.status(key, statuses)
+        return { id: key, name: status, category: statusCategory }
+      })
+    return { ...this.status(item.status, statuses), options, statuses }
+  }
+
+  private status(key: string, statuses: Statuses): SourceStatusResult {
+    return { status: (statuses.names[key] || key || '未知').slice(0, 100), statusCategory: category(key, statuses.lastSteps) }
+  }
+
+  private summary(kind: ItemKind, item: Item, space: Space, statuses: Statuses, labelProject: boolean): SourceIssue {
     const title = item.name || item.title || `${typeName[kind]} ${item.id}`
     return {
       key: itemKey({ kind, id: item.id }), title: title.slice(0, MAX_ISSUE_TITLE_LENGTH),
       url: itemUrl(space.id, kind, item.id, space.lightweight),
-      status: (statuses.names[item.status] || item.status || '未知').slice(0, 100), statusCategory: category(item.status, statuses.lastSteps),
+      ...this.status(item.status, statuses),
       type: (labelProject ? `${typeName[kind]} · ${space.name || space.id}` : typeName[kind]).slice(0, 100), priority: priorityName(item.priority_label, item.priority), updatedAt: time(item.modified || item.created)
     }
   }
@@ -173,16 +244,17 @@ export class TapdClient {
   }
 
   private async items(kind: ItemKind, params: Record<string, string>, signal: AbortSignal): Promise<Item[]> {
-    const path = kind === 'story' ? '/stories' : kind === 'bug' ? '/bugs' : '/tasks'
-    return parse(z.array(z.record(z.string(), z.unknown())), await this.get(path, params, signal)).map((row) => parse(Item, row[wrapper[kind]]))
+    return parse(z.array(z.record(z.string(), z.unknown())), await this.get(paths[kind], params, signal)).map((row) => parse(Item, row[wrapper[kind]]))
   }
 
-  private async statuses(workspace: string, kind: ItemKind, signal: AbortSignal) {
+  // A story category can have its own workflow; without one, the project's statuses all together.
+  private async statuses(workspace: string, kind: ItemKind, signal: AbortSignal, type = ''): Promise<Statuses> {
     if (kind === 'task') return { names: TASK_STATUSES, lastSteps: TASK_LAST_STEPS }
-    const names = parse(Names, await this.get('/workflows/status_map', { workspace_id: workspace, system: kind }, signal))
+    const query = { workspace_id: workspace, system: kind, ...(kind === 'story' && type ? { workitem_type_id: type } : {}) }
+    const names = parse(Names, await this.get('/workflows/status_map', query, signal))
     let lastSteps: Set<string> | null = null
     try {
-      const data = await this.get('/workflows/last_steps', { workspace_id: workspace, system: kind }, signal)
+      const data = await this.get('/workflows/last_steps', query, signal)
       const map = Names.safeParse(data)
       const list = z.array(z.string()).safeParse(data)
       lastSteps = map.success && Object.keys(map.data).length ? new Set(Object.keys(map.data)) : list.success && list.data.length ? new Set(list.data) : null
@@ -219,17 +291,30 @@ export class TapdClient {
     return rows.map(({ Attachment: row }) => row.filename || row.id)
   }
 
-  private async get(path: string, params: Record<string, string>, signal: AbortSignal): Promise<unknown> {
-    const url = `${API}${path}${Object.keys(params).length ? `?${new URLSearchParams(params)}` : ''}`
+  private get(path: string, params: Record<string, string>, signal: AbortSignal): Promise<unknown> {
+    return this.request(path, params, null, signal)
+  }
+
+  // write names the project permission a refusal means the account lacks.
+  private post(path: string, form: Record<string, string>, write: string, signal: AbortSignal): Promise<unknown> {
+    return this.request(path, form, write, signal)
+  }
+
+  private async request(path: string, params: Record<string, string>, write: string | null, signal: AbortSignal): Promise<unknown> {
+    const query = write === null && Object.keys(params).length ? `?${new URLSearchParams(params)}` : ''
+    const url = `${API}${path}${query}`
     for (let attempt = 0; ; attempt++) {
       let response: Response
       try {
         response = await this.fetchImpl(url, {
+          ...(write === null ? {} : { method: 'POST', body: new URLSearchParams(params) }),
           headers: { Authorization: `Bearer ${this.token}`, Accept: 'application/json' }, redirect: 'error',
           signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)])
         })
       } catch { throw new SourceError('request-failed', '无法连接 TAPD，请检查网络') }
-      if (RETRY.has(response.status) && attempt < DELAYS.length) {
+      // A write that met a server error may have landed, so only a rate limit is safe to send again.
+      const retry = write === null ? RETRY.has(response.status) : response.status === 429
+      if (retry && attempt < DELAYS.length) {
         await response.body?.cancel()
         await this.wait(DELAYS[attempt] ?? 0, signal)
         continue
@@ -244,7 +329,11 @@ export class TapdClient {
       const suffix = detail ? `（${detail}）` : ''
       // A bearer token TAPD does not accept is a 422, not a 401.
       if (response.status === 401 || (response.status === 422 && /access token/i.test(info))) throw new SourceError('auth-failed', 'TAPD 令牌无效或已失效，请重新登录')
-      if (response.status === 403) throw new SourceError('forbidden', `这个令牌没有权限访问该项目或接口${suffix}`)
+      if (response.status === 403 || envelope?.status === 403) {
+        throw new SourceError('forbidden', write === null
+          ? `这个令牌没有权限访问该项目或接口${suffix}`
+          : `这个令牌没有写入权限${suffix}。请确认账号在这个 TAPD 项目里有「${write}」权限，再用有写权限的个人访问令牌重新登录`)
+      }
       if (response.status === 404) throw new SourceError('not-found', `TAPD 接口不存在${suffix}`)
       if (response.status === 429) throw new SourceError('request-failed', 'TAPD 接口限流（每分钟 60 次），请稍后再试')
       const failed = [response.ok ? '' : `HTTP ${response.status}`, detail].filter(Boolean).join('，')

@@ -7,7 +7,7 @@
 **做**：把一个 TAPD 项目里的需求、缺陷或任务同步进收件箱，导入成任务，拉取详情（标题、状态、优先级、处理人、描述、评论、附件清单），保留原始链接。评论增量同步（`commentSync: 1`）。配合 Antumi 已有的「新问题自动排查」，事项一指派给自己就自动开排查会话。
 
 **不做（v1）**：
-- 写回 TAPD：不发评论，不流转状态。SDK 目前没有写入接口，要做得先扩插件协议，放第二期。
+- 写回 TAPD：0.1.0 不做。0.2.0 起按 SDK 0.5.0 的来源回写协议支持流转状态（`GET /workflows/all_transitions` 取当前状态的下一步，`POST /stories|bugs|tasks` 写 `status`）和发评论（`POST /comments`，Markdown 转 HTML），见 README「回写」。
 - 公司 API 账号（Basic）和开放平台应用 OAuth：前者要公司管理员在企业版里开通，后者 token 2 小时过期，而 `list`、`fetch` 交不回新凭据。
 - 私有部署和腾讯内网版（`tapd.woa.com`、`apiv2.tapd.tencent.com`）：只接受 `api.tapd.cn`，Token 不会被发到任意地址。有人提出再加。
 - 下载附件和图片：v1 在快照里列出附件名和返回 TAPD 查看的链接，图片随第二期的 `image` 一起做（见第 9 节）。

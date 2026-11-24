@@ -7,6 +7,13 @@ function token(credential: SourceCredential): string {
   return credential.payload.token
 }
 
+// The project an item is read from after it was imported: the one its long ID names, else the first
+// configured. Comment sync and writing back both go there.
+function projectOf(settings: Readonly<Record<string, string>>, id: string): string {
+  const [workspace = ''] = workspaceCandidates(id, parseWorkspaces(settings.workspace ?? ''))
+  return workspace
+}
+
 export function tapdSource(connect = (key: string) => new TapdClient(key)): SourcePlugin {
   return {
     id: 'tapd',
@@ -48,8 +55,19 @@ export function tapdSource(connect = (key: string) => new TapdClient(key)): Sour
     },
     comments(settings, credential, key, signal, options) {
       const { kind, id } = parseKey(key)
-      const [workspace = ''] = workspaceCandidates(id, parseWorkspaces(settings.workspace ?? ''))
-      return connect(token(credential)).commentChanges(workspace, kind, id, signal, options)
+      return connect(token(credential)).commentChanges(projectOf(settings, id), kind, id, signal, options)
+    },
+    transitions(settings, credential, key, signal) {
+      const { kind, id } = parseKey(key)
+      return connect(token(credential)).transitions(projectOf(settings, id), kind, id, signal)
+    },
+    transition(settings, credential, key, target, signal) {
+      const { kind, id } = parseKey(key)
+      return connect(token(credential)).transition(projectOf(settings, id), kind, id, target, signal)
+    },
+    comment(settings, credential, key, { markdown }, signal) {
+      const { kind, id } = parseKey(key)
+      return connect(token(credential)).comment(projectOf(settings, id), kind, id, markdown, signal)
     }
   }
 }
