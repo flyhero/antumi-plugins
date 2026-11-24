@@ -6,23 +6,28 @@ import { MAX_ISSUE_TITLE_LENGTH, MAX_SNAPSHOT_LENGTH, SourceError, type SourceIs
 export type ItemKind = 'task' | 'bug' | 'story'
 const Account = z.union([z.string(), z.object({ account: z.string().optional(), realname: z.string().optional() })]).nullish()
 const Id = z.union([z.number().int().positive(), z.string().regex(/^[1-9][0-9]*$/)]).transform(String)
+const Hours = z.union([z.number(), z.string()]).nullish().transform((value) => { const hours = Number(value ?? 0); return Number.isFinite(hours) ? hours : 0 })
 const Row = z.object({
   id: Id, name: z.string().optional(), title: z.string().optional(), status: z.string(),
   pri: z.union([z.string(), z.number()]).nullish(), assignedTo: Account,
   lastEditedDate: z.string().nullish(), editedDate: z.string().nullish(), openedDate: z.string().nullish(),
   desc: z.string().nullish(), steps: z.string().nullish(), spec: z.string().nullish(), verify: z.string().nullish(),
   deleted: z.union([z.boolean(), z.number(), z.string()]).optional(),
+  // Task fields the status moves need: hours to report, and whether it is a parent task.
+  left: Hours, estimate: Hours, consumed: Hours, realStarted: z.string().nullish(),
+  isParent: z.union([z.boolean(), z.number(), z.string()]).optional(), parent: z.union([z.number(), z.string()]).nullish(),
   actions: z.union([
     z.array(z.object({ id: Id.optional(), comment: z.string().nullish(), actor: Account, date: z.string().nullish() })),
     z.record(z.string(), z.object({ id: Id.optional(), comment: z.string().nullish(), actor: Account, date: z.string().nullish() }))
   ]).optional()
 })
+export type ZentaoRow = z.infer<typeof Row>
 const Page = z.object({
   page: z.coerce.number().int().positive(), total: z.coerce.number().int().nonnegative(), limit: z.coerce.number().int().positive(),
   tasks: z.array(Row).optional(), bugs: z.array(Row).optional(), stories: z.array(Row).optional()
 })
 const Profile = z.object({ profile: z.object({ account: z.string().min(1), realname: z.string().optional() }) })
-const plural: Record<ItemKind, 'tasks' | 'bugs' | 'stories'> = { task: 'tasks', bug: 'bugs', story: 'stories' }
+export const plural: Record<ItemKind, 'tasks' | 'bugs' | 'stories'> = { task: 'tasks', bug: 'bugs', story: 'stories' }
 const titles: Record<ItemKind, string> = { task: '任务', bug: 'Bug', story: '需求' }
 const markdown = new TurndownService({ headingStyle: 'atx', codeBlockStyle: 'fenced' })
 markdown.remove(['script', 'style', 'iframe'])
@@ -42,7 +47,18 @@ function time(value: string | null | undefined): number | null {
   return Number.isFinite(result) ? result : null
 }
 
-function category(kind: ItemKind, state: string): SourceIssue['statusCategory'] {
+// The names ZenTao's zh-cn interface shows, so rules can name a status as users see it.
+const statusNames: Record<ItemKind, Record<string, string>> = {
+  task: { wait: '未开始', doing: '进行中', done: '已完成', pause: '已暂停', cancel: '已取消', closed: '已关闭' },
+  bug: { active: '激活', resolved: '已解决', closed: '已关闭' },
+  story: { draft: '草稿', reviewing: '评审中', active: '激活', changing: '变更中', closed: '已关闭' }
+}
+
+export function statusName(kind: ItemKind, state: string): string {
+  return (statusNames[kind][state] ?? state).slice(0, 100)
+}
+
+export function category(kind: ItemKind, state: string): SourceIssue['statusCategory'] {
   if (['closed', 'cancel', 'canceled', 'done'].includes(state) || (kind === 'bug' && state === 'resolved')) return 'done'
   if (['doing', 'pause', 'changing', 'developing', 'testing'].includes(state)) return 'doing'
   if (['wait', 'active', 'draft', 'reviewing', 'changed'].includes(state)) return 'todo'
@@ -55,7 +71,7 @@ function summary(kind: ItemKind, row: z.infer<typeof Row>, base: string): Source
   web.search = new URLSearchParams({ m: kind, f: 'view', [`${kind}ID`]: row.id }).toString()
   return {
     key: `${kind}-${row.id}`, title: (row.name ?? row.title ?? `${titles[kind]} ${row.id}`).slice(0, MAX_ISSUE_TITLE_LENGTH),
-    url: web.href, status: row.status.slice(0, 100), statusCategory: category(kind, row.status),
+    url: web.href, status: statusName(kind, row.status), statusCategory: category(kind, row.status),
     type: titles[kind], priority: row.pri == null || String(row.pri) === '0' ? null : `P${row.pri}`.slice(0, 100),
     updatedAt: time(row.lastEditedDate ?? row.editedDate ?? row.openedDate)
   }
@@ -95,9 +111,22 @@ export class ZentaoClient {
     return [...found.values()].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0)).slice(0, 200)
   }
 
-  async issue(kind: ItemKind, id: string, signal: AbortSignal): Promise<SourceIssueDetail> {
+  async row(kind: ItemKind, id: string, signal: AbortSignal): Promise<ZentaoRow> {
     const row = parse(Row, await this.get(`/${plural[kind]}/${id}`, signal))
     if (row.id !== id) throw new SourceError('request-failed', '禅道返回的事项编号不匹配')
+    return row
+  }
+
+  // Runs one of the item's actions (start, resolve, ...) and returns its status afterwards.
+  // forbidden names the privilege ZenTao refused, so the user knows what to ask for.
+  async act(kind: ItemKind, id: string, path: string, body: Record<string, unknown>, forbidden: string, signal: AbortSignal): Promise<string> {
+    const reply = z.object({ id: Id, status: z.string().min(1) }).safeParse(await this.request(`/${plural[kind]}/${id}/${path}`, signal, { body, forbidden }))
+    // Some actions answer with the raw record; read it back when the status is not plainly there.
+    return reply.success && reply.data.id === id ? reply.data.status : (await this.row(kind, id, signal)).status
+  }
+
+  async issue(kind: ItemKind, id: string, signal: AbortSignal): Promise<SourceIssueDetail> {
+    const row = await this.row(kind, id, signal)
     const issue = summary(kind, row, this.base)
     const body = kind === 'bug' ? row.steps : kind === 'story' ? row.spec ?? row.desc : row.desc
     const actions = row.actions ? (Array.isArray(row.actions) ? row.actions : Object.values(row.actions)) : []
@@ -127,49 +156,80 @@ export class ZentaoClient {
   }
 
   async commentChanges(kind: ItemKind, id: string, signal: AbortSignal, options: SourceCommentOptions): Promise<SourceCommentPage> {
-    const row = parse(Row, await this.get(`/${plural[kind]}/${id}`, signal))
-    if (row.id !== id) throw new SourceError('request-failed', '禅道返回的事项编号不匹配')
+    const row = await this.row(kind, id, signal)
     const comments = this.commentsOf(row, summary(kind, row, this.base).url)
     if (!comments) throw new SourceError('request-failed', '禅道没有返回稳定的评论标识，只能更新原文快照')
     return commentPage(comments, options)
   }
 
-  private async get(path: string, signal: AbortSignal): Promise<unknown> {
+  private get(path: string, signal: AbortSignal): Promise<unknown> {
+    return this.request(path, signal)
+  }
+
+  // A write is a POST with a JSON body; its 400 and 403 answers carry ZenTao's reason.
+  private async request(path: string, signal: AbortSignal, write?: { body: Record<string, unknown>; forbidden: string }): Promise<unknown> {
     let response: Response
     try {
       response = await this.fetchImpl(`${this.base}${path}`, {
-        headers: { Token: this.token, Accept: 'application/json' }, redirect: 'error',
+        ...(write ? { method: 'POST', body: JSON.stringify(write.body) } : {}),
+        headers: { Token: this.token, Accept: 'application/json', ...(write ? { 'Content-Type': 'application/json' } : {}) }, redirect: 'error',
         signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)])
       })
     } catch { throw new SourceError('request-failed', '无法连接禅道，请检查 API 地址和网络') }
+    if (write && response.status === 403) {
+      await response.body?.cancel()
+      throw new SourceError('forbidden', `禅道账号没有「${write.forbidden}」权限，请在禅道为账号开通，或换用有该权限的账号获取 Token 后重新登录`)
+    }
+    if (write && response.status === 400) {
+      const reason = await readJson(response, 64 * 1024).then(reasonText, () => '')
+      throw new SourceError('request-failed', `禅道拒绝了这次操作${reason}`)
+    }
     if (!response.ok) {
       await response.body?.cancel()
       const code = response.status === 401 ? 'auth-failed' : response.status === 403 ? 'forbidden' : response.status === 404 ? 'not-found' : 'request-failed'
       throw new SourceError(code, `禅道请求失败（HTTP ${response.status}）`)
     }
-    const max = 5 * 1024 * 1024
-    if (Number(response.headers.get('content-length')) > max) {
-      await response.body?.cancel()
-      throw new SourceError('response-too-large', '禅道返回内容过大')
-    }
-    const reader = response.body?.getReader()
-    if (!reader) throw new SourceError('request-failed', '禅道返回了空响应')
-    const chunks: Uint8Array[] = []
-    let size = 0
-    try {
-      for (;;) {
-        const { value, done } = await reader.read()
-        if (done) break
-        size += value.byteLength
-        if (size > max) { await reader.cancel(); throw new SourceError('response-too-large', '禅道返回内容过大') }
-        chunks.push(value)
-      }
-    } finally { reader.releaseLock() }
-    let data: unknown
-    try { data = JSON.parse(Buffer.concat(chunks).toString('utf8')) }
-    catch { throw new SourceError('request-failed', '禅道没有返回 JSON，请确认 RESTful API v1 地址') }
+    const data = await readJson(response, 5 * 1024 * 1024)
     const failure = z.object({ error: z.unknown().optional(), status: z.string().optional() }).passthrough().safeParse(data)
-    if (failure.success && (failure.data.error || failure.data.status === 'fail')) throw new SourceError('request-failed', '禅道未能完成请求，请检查账号权限和 API 地址')
+    if (failure.success && (failure.data.error || failure.data.status === 'fail')) {
+      throw new SourceError('request-failed', write ? `禅道拒绝了这次操作${reasonText(data)}` : '禅道未能完成请求，请检查账号权限和 API 地址')
+    }
     return data
   }
+}
+
+async function readJson(response: Response, max: number): Promise<unknown> {
+  if (Number(response.headers.get('content-length')) > max) {
+    await response.body?.cancel()
+    throw new SourceError('response-too-large', '禅道返回内容过大')
+  }
+  const reader = response.body?.getReader()
+  if (!reader) throw new SourceError('request-failed', '禅道返回了空响应')
+  const chunks: Uint8Array[] = []
+  let size = 0
+  try {
+    for (;;) {
+      const { value, done } = await reader.read()
+      if (done) break
+      size += value.byteLength
+      if (size > max) { await reader.cancel(); throw new SourceError('response-too-large', '禅道返回内容过大') }
+      chunks.push(value)
+    }
+  } finally { reader.releaseLock() }
+  try { return JSON.parse(Buffer.concat(chunks).toString('utf8')) }
+  catch { throw new SourceError('request-failed', '禅道没有返回 JSON，请确认 RESTful API v1 地址') }
+}
+
+// ZenTao's own words for a refused action (「总计消耗为0时不能完成任务」), short and without markup;
+// never the whole body.
+function reasonText(data: unknown): string {
+  const texts: string[] = []
+  const collect = (value: unknown, depth: number) => {
+    if (typeof value === 'string') texts.push(value)
+    else if (depth < 3 && value && typeof value === 'object') for (const item of Object.values(value)) collect(item, depth + 1)
+  }
+  const reply = z.object({ error: z.unknown().optional(), message: z.unknown().optional() }).safeParse(data)
+  if (reply.success) collect(reply.data.error ?? reply.data.message, 0)
+  const text = texts.join('；').replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim()
+  return text && text !== 'error' ? `：${text.slice(0, 200)}` : ''
 }

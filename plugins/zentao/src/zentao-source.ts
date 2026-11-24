@@ -1,5 +1,6 @@
 import { SourceError, type SourceCredential, type SourcePlugin } from '@antumi/plugin-sdk'
 import { ZentaoClient, type ItemKind } from './zentao-client.js'
+import { transition, transitions } from './zentao-writeback.js'
 
 function kind(value: string | undefined): ItemKind {
   if (value === 'task' || value === 'bug' || value === 'story') return value
@@ -9,6 +10,12 @@ function kind(value: string | undefined): ItemKind {
 function token(credential: SourceCredential): string {
   if (credential.kind !== 'token' || !credential.payload.token) throw new SourceError('not-configured', '请先登录禅道')
   return credential.payload.token
+}
+
+function item(key: string): [ItemKind, string] {
+  const match = /^(task|bug|story)-([1-9][0-9]*)$/.exec(key)
+  if (!match) throw new SourceError('not-found', '无效的禅道事项编号')
+  return [kind(match[1]), match[2] ?? '']
 }
 
 export function normalizeApiBase(value: string): string {
@@ -56,15 +63,21 @@ export function zentaoSource(connect = (base: string, key: string) => new Zentao
       throw new SourceError('auth-failed', '禅道登录失败')
     },
     comments(settings, credential, key, signal, options) {
-      const match = /^(task|bug|story)-([1-9][0-9]*)$/.exec(key)
-      if (!match) throw new SourceError('not-found', '无效的禅道事项编号')
-      return connect(normalizeApiBase(settings.apiBase ?? ''), token(credential)).commentChanges(kind(match[1]), match[2] ?? '', signal, options)
+      const [type, id] = item(key)
+      return connect(normalizeApiBase(settings.apiBase ?? ''), token(credential)).commentChanges(type, id, signal, options)
     },
     list: (settings, credential, signal) => connect(normalizeApiBase(settings.apiBase ?? ''), token(credential)).list(kind(settings.kind), settings, signal),
     fetch(settings, credential, key, signal) {
-      const match = /^(task|bug|story)-([1-9][0-9]*)$/.exec(key)
-      if (!match) throw new SourceError('not-found', '无效的禅道事项编号')
-      return connect(normalizeApiBase(settings.apiBase ?? ''), token(credential)).issue(kind(match[1]), match[2] ?? '', signal)
+      const [type, id] = item(key)
+      return connect(normalizeApiBase(settings.apiBase ?? ''), token(credential)).issue(type, id, signal)
+    },
+    async transitions(settings, credential, key, signal) {
+      const [type, id] = item(key)
+      return transitions(connect(normalizeApiBase(settings.apiBase ?? ''), token(credential)), type, id, signal)
+    },
+    async transition(settings, credential, key, option, signal) {
+      const [type, id] = item(key)
+      return transition(connect(normalizeApiBase(settings.apiBase ?? ''), token(credential)), type, id, option, signal)
     }
   }
 }
