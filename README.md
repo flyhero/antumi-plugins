@@ -1,6 +1,6 @@
 # Antumi Plugins
 
-Antumi 官方插件仓库。按插件身份组织目录，统一开发工具和构建流程，每个插件独立版本、独立 ZIP、独立发布。当前五个插件提供任务来源能力；仓库名称和目录不限定能力类型，未来可加入其他能力的插件。当前 SDK 仍只支持任务来源，不声明尚未实现的扩展点。
+Antumi 官方插件仓库。按插件身份组织目录，统一开发工具和构建流程，每个插件独立版本、独立 ZIP、独立发布。当前六个插件提供任务来源能力；仓库名称和目录不限定能力类型，未来可加入其他能力的插件。当前 SDK 仍只支持任务来源，不声明尚未实现的扩展点。
 
 | 插件 | 包名 | 插件 ID | 来源 ID | Release 标签 |
 | --- | --- | --- | --- | --- |
@@ -9,6 +9,7 @@ Antumi 官方插件仓库。按插件身份组织目录，统一开发工具和�
 | [Linear](plugins/linear/README.md) | antumi-plugin-linear | antumi.linear | linear | linear-vX.Y.Z |
 | [禅道](plugins/zentao/README.md) | antumi-plugin-zentao | antumi.zentao | zentao | zentao-vX.Y.Z |
 | [飞书项目](plugins/meegle/README.md) | antumi-plugin-meegle | antumi.meegle | meegle | meegle-vX.Y.Z |
+| [TAPD](plugins/tapd/README.md) | antumi-plugin-tapd | antumi.tapd | tapd | tapd-vX.Y.Z |
 
 ## 开发
 

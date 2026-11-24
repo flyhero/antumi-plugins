@@ -1,0 +1,87 @@
+{
+  "id": "antumi.tapd",
+  "version": "0.1.0",
+  "engines": {
+    "antumi": ">=0.15.11 <1.0.0"
+  },
+  "contributes": {
+    "sources": [
+      {
+        "id": "tapd",
+        "commentSync": 1,
+        "name": "TAPD",
+        "settings": [
+          {
+            "key": "workspace",
+            "type": "text",
+            "label": "项目",
+            "required": true,
+            "mono": true,
+            "placeholder": "https://www.tapd.cn/12345678/prong/stories/stories_list",
+            "hint": "填写项目 ID，或在项目里打开任意页面，复制浏览器地址栏的地址。",
+            "translations": {
+              "en": {
+                "label": "Project",
+                "hint": "The project ID, or the address of any page in the project."
+              }
+            }
+          },
+          {
+            "key": "kind",
+            "type": "select",
+            "label": "事项类型",
+            "required": true,
+            "default": "story",
+            "options": [
+              { "value": "story", "label": "需求", "translations": { "en": { "label": "Stories" } } },
+              { "value": "bug", "label": "缺陷", "translations": { "en": { "label": "Bugs" } } },
+              { "value": "task", "label": "任务", "translations": { "en": { "label": "Tasks" } } }
+            ],
+            "translations": {
+              "en": {
+                "label": "Item type"
+              }
+            }
+          },
+          {
+            "key": "assignee",
+            "type": "text",
+            "label": "处理人",
+            "required": false,
+            "default": "@me",
+            "hint": "@me 表示自己，留空表示所有人，也可填写 TAPD 昵称。",
+            "translations": {
+              "en": {
+                "label": "Handler",
+                "hint": "@me for yourself, empty for anyone, or a TAPD nickname."
+              }
+            }
+          },
+          {
+            "key": "state",
+            "type": "select",
+            "label": "状态范围",
+            "required": true,
+            "default": "active",
+            "options": [
+              { "value": "active", "label": "未完成", "translations": { "en": { "label": "Unfinished" } } },
+              { "value": "all", "label": "全部", "translations": { "en": { "label": "All" } } }
+            ],
+            "translations": {
+              "en": {
+                "label": "Status"
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "entry": {
+    "runtime": "node",
+    "main": "main.mjs"
+  },
+  "env": [
+    "ANTUMI_TAPD_TOKEN"
+  ]
+}
