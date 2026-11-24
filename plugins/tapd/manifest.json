@@ -1,6 +1,6 @@
 {
   "id": "antumi.tapd",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "engines": {
     "antumi": ">=0.15.11 <1.0.0"
   },
@@ -10,6 +10,7 @@
         "id": "tapd",
         "commentSync": 1,
         "writeback": 1,
+        "writebackRules": {"start": {"presets": [{"value": "进行中|开发中", "label": "任务进行中、需求开发中", "translations": {"en": {"label": "Task in progress, story in development"}}}], "placeholder": "如：开发中 | 进行中", "hint": "需求和缺陷按项目工作流的状态名填；任务只有未开始、进行中、已完成。", "translations": {"en": {"placeholder": "e.g. 开发中 | 进行中", "hint": "Stories and bugs take the status names of the project's workflow; tasks have only 未开始, 进行中 and 已完成."}}}, "review": {"presets": [{"value": "已完成|已实现|已解决", "label": "任务已完成、需求已实现、缺陷已解决", "translations": {"en": {"label": "Task done, story implemented, bug resolved"}}}], "placeholder": "如：已实现 | 已解决", "translations": {"en": {"placeholder": "e.g. 已实现 | 已解决"}}}, "done": {"presets": [{"value": "已完成|已实现|已解决", "label": "任务已完成、需求已实现、缺陷已解决", "translations": {"en": {"label": "Task done, story implemented, bug resolved"}}}], "placeholder": "如：已关闭", "translations": {"en": {"placeholder": "e.g. 已关闭"}}}},
         "name": "TAPD",
         "settings": [
           {
