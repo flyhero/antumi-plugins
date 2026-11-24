@@ -65,6 +65,10 @@ export function category(kind: ItemKind, state: string): SourceIssue['statusCate
   return 'unknown'
 }
 
+function tooLarge(kind: ItemKind): string {
+  return kind === 'task' ? '执行下任务过多，请把「指派给」设为 @me，或把状态范围设为「未完成」' : '同步范围过大或分页异常，请缩小产品范围'
+}
+
 function summary(kind: ItemKind, row: z.infer<typeof Row>, base: string): SourceIssue {
   const web = new URL(base)
   web.pathname = web.pathname.replace(/api\.php\/v1\/?$/, 'index.php')
@@ -77,6 +81,10 @@ function summary(kind: ItemKind, row: z.infer<typeof Row>, base: string): Source
   }
 }
 
+// Antumi gives a list 20 seconds; past this, say the scope is too large rather than time out.
+const LIST_BUDGET_MS = 15_000
+const NO_ACCESS = '禅道账号没有访问该数据的权限，请在禅道为账号开通对应执行 / 产品的查看权限'
+
 export class ZentaoClient {
   constructor(private readonly base: string, private readonly token: string, private readonly fetchImpl: typeof fetch = fetch) {}
 
@@ -86,12 +94,18 @@ export class ZentaoClient {
 
   async list(kind: ItemKind, settings: SourceSettings, signal: AbortSignal): Promise<SourceIssue[]> {
     const owner = settings.assignee === '@me' ? (await this.profile(signal)).account : settings.assignee
+    // An execution can hold tens of thousands of tasks, so let ZenTao filter them. assignedtome also
+    // covers multi-person tasks, whose assignedTo ZenTao blanks, so those skip the local owner check.
+    const mine = kind === 'task' && !!owner && (settings.assignee === '@me' || owner === (await this.profile(signal)).account)
+    const status = kind !== 'task' ? null : mine ? 'assignedtome' : settings.state !== 'all' ? 'undone' : null
     const collection = plural[kind]
     const path = kind === 'task' ? `/executions/${settings.scopeId}/tasks` : `/products/${settings.scopeId}/${collection}`
     const found = new Map<string, SourceIssue>()
     const seen = new Set<string>()
+    const deadline = Date.now() + LIST_BUDGET_MS
     for (let page = 1; page <= 20; page++) {
-      const params = new URLSearchParams({ page: String(page), limit: '100', orderBy: 'id_desc' })
+      if (page > 1 && Date.now() > deadline) throw new SourceError('bad-query', tooLarge(kind))
+      const params = new URLSearchParams({ page: String(page), limit: '100', order: 'id_desc', ...(status ? { status } : {}) })
       const data = parse(Page, await this.get(`${path}?${params}`, signal))
       const rows = data[collection]
       if (data.page !== page || !Array.isArray(rows)) throw new SourceError('request-failed', '禅道返回了无效的分页信息')
@@ -100,13 +114,13 @@ export class ZentaoClient {
         if (seen.has(row.id)) continue
         seen.add(row.id)
         if (row.deleted === true || row.deleted === 1 || row.deleted === '1') continue
-        if (owner && account(row.assignedTo) !== owner) continue
+        if (owner && !mine && account(row.assignedTo) !== owner) continue
         const issue = summary(kind, row, this.base)
         if (settings.state !== 'all' && issue.statusCategory === 'done') continue
         found.set(issue.key, issue)
       }
       if (found.size >= 200 || page * data.limit >= data.total) break
-      if (!items.length || (page === 20)) throw new SourceError('bad-query', '同步范围过大或分页异常，请缩小执行 / 产品范围')
+      if (!items.length || (page === 20)) throw new SourceError('bad-query', tooLarge(kind))
     }
     return [...found.values()].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0)).slice(0, 200)
   }
@@ -187,11 +201,12 @@ export class ZentaoClient {
     if (!response.ok) {
       await response.body?.cancel()
       const code = response.status === 401 ? 'auth-failed' : response.status === 403 ? 'forbidden' : response.status === 404 ? 'not-found' : 'request-failed'
-      throw new SourceError(code, `禅道请求失败（HTTP ${response.status}）`)
+      throw new SourceError(code, code === 'forbidden' ? NO_ACCESS : `禅道请求失败（HTTP ${response.status}）`)
     }
     const data = await readJson(response, 5 * 1024 * 1024)
     const failure = z.object({ error: z.unknown().optional(), status: z.string().optional() }).passthrough().safeParse(data)
     if (failure.success && (failure.data.error || failure.data.status === 'fail')) {
+      if (!write && failure.data.error === 'Access not allowed') throw new SourceError('forbidden', NO_ACCESS)
       throw new SourceError('request-failed', write ? `禅道拒绝了这次操作${reasonText(data)}` : '禅道未能完成请求，请检查账号权限和 API 地址')
     }
     return data

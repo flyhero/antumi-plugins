@@ -25,17 +25,49 @@ describe('ZenTao source', () => {
     expect(fetcher.mock.calls[0]).toMatchObject([`${base}/user`, { headers: { Token: 'token' }, redirect: 'error' }])
   })
 
-  it('pages task results before filtering assignee and completion locally', async () => {
+  it('asks ZenTao for my tasks instead of paging the whole execution', async () => {
     const fetcher = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(Response.json({ profile: { account: 'ann' } }))
-      .mockResolvedValueOnce(Response.json({ page: 1, limit: 1, total: 3, tasks: [{ ...row, id: 1, assignedTo: 'bob' }] }))
-      .mockResolvedValueOnce(Response.json({ page: 2, limit: 1, total: 3, tasks: [{ ...row, id: 2, status: 'closed' }] }))
-      .mockResolvedValueOnce(Response.json({ page: 3, limit: 1, total: 3, tasks: [row] }))
+      // A multi-person task comes back with assignedTo blanked; ZenTao already matched it to me.
+      .mockResolvedValueOnce(Response.json({ page: 1, limit: 100, total: 3, tasks: [row, { ...row, id: 2, status: 'closed' }, { ...row, id: 3, assignedTo: '' }] }))
     const issues = await new ZentaoClient(base, 'token', fetcher).list('task', { scopeId: '42', assignee: '@me', state: 'active' }, signal)
-    expect(issues).toMatchObject([{ key: 'task-12', priority: 'P2', statusCategory: 'doing' }])
-    expect(issues[0]?.url).toBe('https://example.com/zentao/index.php?m=task&f=view&taskID=12')
-    expect(fetcher.mock.calls[1]?.[0]).toBe(`${base}/executions/42/tasks?page=1&limit=100&orderBy=id_desc`)
-    expect(fetcher).toHaveBeenCalledTimes(4)
+    expect(issues.map((issue) => issue.key).sort()).toEqual(['task-12', 'task-3'])
+    expect(issues.find((issue) => issue.key === 'task-12')).toMatchObject({ priority: 'P2', statusCategory: 'doing', url: 'https://example.com/zentao/index.php?m=task&f=view&taskID=12' })
+    expect(fetcher.mock.calls[1]?.[0]).toBe(`${base}/executions/42/tasks?page=1&limit=100&order=id_desc&status=assignedtome`)
+    expect(fetcher).toHaveBeenCalledTimes(2)
+  })
+
+  it('pages unfinished tasks of another account and filters the assignee locally', async () => {
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json({ profile: { account: 'ann' } }))
+      .mockResolvedValueOnce(Response.json({ page: 1, limit: 1, total: 2, tasks: [row] }))
+      .mockResolvedValueOnce(Response.json({ page: 2, limit: 1, total: 2, tasks: [{ ...row, id: 2, assignedTo: 'bob' }] }))
+    const issues = await new ZentaoClient(base, 'token', fetcher).list('task', { scopeId: '42', assignee: 'bob', state: 'active' }, signal)
+    expect(issues).toMatchObject([{ key: 'task-2' }])
+    expect(fetcher.mock.calls[1]?.[0]).toBe(`${base}/executions/42/tasks?page=1&limit=100&order=id_desc&status=undone`)
+    const everyone = vi.fn<typeof fetch>().mockResolvedValueOnce(Response.json({ page: 1, limit: 100, total: 1, tasks: [row] }))
+    await new ZentaoClient(base, 'token', everyone).list('task', { scopeId: '42', assignee: '', state: 'all' }, signal)
+    expect(everyone.mock.calls[0]?.[0]).toBe(`${base}/executions/42/tasks?page=1&limit=100&order=id_desc`)
+  })
+
+  it('says the scope is too large before Antumi times the list out', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      const fetcher = vi.fn<typeof fetch>().mockImplementation(async (url) => {
+        vi.setSystemTime(Date.now() + 8_000)
+        const page = Number(new URL(String(url)).searchParams.get('page'))
+        return Response.json({ page, limit: 100, total: 18_314, tasks: [{ ...row, id: page, assignedTo: 'bob' }] })
+      })
+      await expect(new ZentaoClient(base, 'token', fetcher).list('task', { scopeId: '42', assignee: '', state: 'all' }, signal)).rejects.toMatchObject({ code: 'bad-query', message: expect.stringContaining('@me') })
+      expect(fetcher).toHaveBeenCalledTimes(2)
+    } finally { vi.useRealTimers() }
+  })
+
+  it('reports a refused read as missing permission', async () => {
+    const refused = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ error: 'Access not allowed' }))
+    await expect(new ZentaoClient(base, 'token', refused).list('bug', { scopeId: '7' }, signal)).rejects.toMatchObject({ code: 'forbidden', message: expect.stringContaining('权限') })
+    const forbidden = vi.fn<typeof fetch>().mockResolvedValue(new Response('', { status: 403 }))
+    await expect(new ZentaoClient(base, 'token', forbidden).list('bug', { scopeId: '7' }, signal)).rejects.toMatchObject({ code: 'forbidden', message: expect.stringContaining('权限') })
   })
 
   it('maps bugs and stories to separate namespaces and excludes deleted items', async () => {
