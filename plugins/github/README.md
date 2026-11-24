@@ -19,6 +19,7 @@ Token 需要读取账号及目标仓库 Issues / Pull Requests 的权限。具�
 - 在 Antumi 里修改事项状态、发评论。Issue 可以「Close as completed」「Close as not planned」，已关闭的可以 Reopen；Pull Request 只能关闭或重新打开，不能合并，已合并的不能再打开。
 - 评论按 Markdown 原样发出，评论同步读回时认作 Antumi 自己发的，不算新评论。
 - 用上 [Issue 状态](https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/issue-status-webhooks-and-workflows)（GitHub 预览功能）的仓库，Issue 按状态流转：Backlog、Todo、In progress、In review、Done、Not planned，GitHub 会跟着打开或关闭 Issue；Duplicate 要指定重复的 Issue，不提供。其他仓库仍是打开和关闭。
+- 「设置 → 集成 → GitHub → 回写」：开始执行可选 In progress，提交验收可选 In review，只对用 Issue 状态的仓库生效；验收通过选「完成」，有状态的仓库改为 Done，其他仓库关闭为已完成。只改 Issue，不关 Pull Request。
 - 写入需要写权限：Fine-grained Token 需要 Issues 读写（回写 Pull Request 状态还需要 Pull requests 读写）；Classic Token 需要 `repo`，只用公开仓库时 `public_repo` 即可。
 - 只读 Token 照常同步，写入时报「没有权限」；换一个有写权限的 Token 重新登录即可。已锁定的事项只有协作者能评论。
 

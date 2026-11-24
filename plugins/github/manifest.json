@@ -8,6 +8,7 @@
     "sources": [
       {
         "id": "github", "commentSync": 1, "writeback": 1,
+        "writebackRules": {"start": {"presets": [{"value": "In progress", "label": "In progress", "translations": {"en": {"label": "In progress"}}}], "custom": false, "hint": "Issue 状态（Backlog、In progress、In review、Done 等）还在 GitHub 预览中，只有用上它的仓库才有；其他仓库没有这一步，跳过。", "translations": {"en": {"hint": "Issue statuses (Backlog, In progress, In review, Done…) are in preview on GitHub and only exist in repositories that use them; elsewhere this step is skipped."}}}, "review": {"presets": [{"value": "In review", "label": "In review（仅用 Issue 状态的仓库）", "translations": {"en": {"label": "In review (repositories with issue statuses)"}}}, {"value": "Done|completed", "label": "完成：Done，或关闭为已完成", "translations": {"en": {"label": "Done, or close as completed"}}}], "custom": false}, "done": {"presets": [{"value": "Done|completed", "label": "完成：Done，或关闭为已完成", "translations": {"en": {"label": "Done, or close as completed"}}}], "custom": false, "hint": "只改 Issue；Pull Request 不会被关闭，它要合并而不是关掉。", "translations": {"en": {"hint": "Issues only; pull requests are left open, to be merged rather than closed."}}}},
         "name": "GitHub",
         "settings": [
           {

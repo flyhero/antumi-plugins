@@ -3,6 +3,8 @@
 ## 1.3.0（未发布）
 
 - 用上 GitHub Issue 状态（预览）的仓库，回写可以把 Issue 改为 In progress、In review、Done 等状态。
+- 「设置 → 集成 → GitHub → 回写」改为从下拉框选状态：In progress、In review、完成。
+- 要配合更新后的 Antumi 才按平台显示；旧版 Antumi 照旧是三个文本框，规则照常生效。
 
 ## 1.2.1
 
