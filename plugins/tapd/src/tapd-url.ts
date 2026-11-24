@@ -34,6 +34,28 @@ export function parseWorkspace(value: string): string {
   return candidate
 }
 
+export const MAX_WORKSPACES = 10
+
+// Each project costs a sync about four requests against TAPD's 60 a minute, hence the cap.
+export function parseWorkspaces(value: string): string[] {
+  const parts = value.split(/[\s,，;；]+/).filter(Boolean)
+  if (!parts.length) throw new SourceError('invalid-settings', '请填写 TAPD 项目 ID，或粘贴项目里任意页面的地址')
+  const workspaces = [...new Set(parts.map(parseWorkspace))]
+  if (workspaces.length > MAX_WORKSPACES) throw new SourceError('invalid-settings', `最多填写 ${MAX_WORKSPACES} 个项目`)
+  return workspaces
+}
+
+// A long ID is a two-digit prefix, the project and a nine-digit serial (11 64208216 001042393 seen live).
+export function idWorkspace(id: string): string | null {
+  return /^1[01]([1-9][0-9]{0,14})[0-9]{9}$/.exec(id)?.[1] ?? null
+}
+
+// Where to look for an item: the project its ID names when that is configured, then the rest.
+export function workspaceCandidates(id: string, configured: readonly string[]): string[] {
+  const named = idWorkspace(id)
+  return [...new Set([...(named && configured.includes(named) ? [named] : []), ...configured, ...(named ? [named] : [])])]
+}
+
 export function itemUrl(workspace: string, kind: ItemKind, id: string, lightweight: boolean): string {
   if (lightweight && kind === 'story') return `${WEB}/tapd_fe/t/index/${workspace}?workitemId=${id}`
   const path = kind === 'story' ? 'prong/stories' : kind === 'task' ? 'prong/tasks' : 'bugtrace/bugs'

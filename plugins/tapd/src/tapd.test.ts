@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { SourceError } from '@antumi/plugin-sdk'
 import { people, TapdClient, time } from './tapd-client.js'
 import { tapdSource } from './tapd-source.js'
-import { itemRef, itemUrl, parseWorkspace } from './tapd-url.js'
+import { idWorkspace, itemRef, itemUrl, parseWorkspace, parseWorkspaces, workspaceCandidates } from './tapd-url.js'
 
 const signal = new AbortController().signal
 const token = 'tapd-secret-token'
@@ -47,6 +47,19 @@ describe('TAPD addresses', () => {
     }
   })
 
+  it('reads several projects and finds an item\'s project in its ID', () => {
+    expect(parseWorkspaces(`${ws}, https://www.tapd.cn/64208216/prong/stories/stories_list，${ws}\n30000001`)).toEqual([ws, '64208216', '30000001'])
+    expect(() => parseWorkspaces(' , ')).toThrow(SourceError)
+    expect(() => parseWorkspaces(Array.from({ length: 11 }, (_, i) => String(i + 1)).join(','))).toThrow(SourceError)
+    // Seen live: story 1042393 in project 64208216.
+    expect(idWorkspace('1164208216001042393')).toBe('64208216')
+    expect(idWorkspace(storyId)).toBe(ws)
+    expect(idWorkspace('42')).toBeNull()
+    expect(workspaceCandidates('1164208216001042393', [ws, '64208216'])).toEqual(['64208216', ws])
+    expect(workspaceCandidates('1164208216001042393', [ws])).toEqual([ws, '64208216'])
+    expect(workspaceCandidates('42', [ws, '30000001'])).toEqual([ws, '30000001'])
+  })
+
   it('reads an item from its key or its page, and links back to it', () => {
     expect(itemRef(` STORY-${storyId} `)).toEqual({ kind: 'story', id: storyId })
     expect(itemRef(`https://www.tapd.cn/${ws}/prong/stories/view/${storyId}`)).toEqual({ kind: 'story', id: storyId })
@@ -67,6 +80,7 @@ describe('TAPD addresses', () => {
     const source = tapdSource()
     expect(source.normalizeSettings({ workspace: `https://www.tapd.cn/${ws}/prong/stories/stories_list` })).toEqual({ workspace: ws, kind: 'story', assignee: '@me', state: 'active' })
     expect(source.normalizeSettings({ workspace: ws, kind: 'bug', assignee: ' bob ', state: 'all' })).toEqual({ workspace: ws, kind: 'bug', assignee: 'bob', state: 'all' })
+    expect(source.normalizeSettings({ workspace: `${ws} 64208216` })).toMatchObject({ workspace: `${ws},64208216` })
     expect(() => source.normalizeSettings({ workspace: ws, kind: 'epic' })).toThrow(SourceError)
     expect(() => source.normalizeSettings({ workspace: ws, assignee: 'ann;bob' })).toThrow(SourceError)
     expect(source.normalizeKey?.(`https://www.tapd.cn/${ws}/bugtrace/bugs/view/43`)).toBe('bug-43')
@@ -150,6 +164,46 @@ describe('TAPD client', () => {
     expect((await client.list({ workspace: ws, kind: 'story', assignee: '', state: 'all' }, signal))[0]?.url).toBe(`https://www.tapd.cn/tapd_fe/t/index/${ws}?workitemId=7`)
   })
 
+  it('syncs several projects into one list, naming the project of each item', async () => {
+    const other = '64208216'
+    const { calls, client } = server({
+      ...routes,
+      '/workspaces/get_workspace_info': (params) => ok({ Workspace: { id: params.get('workspace_id'), name: params.get('workspace_id') === ws ? '商城' : '招聘系统', category: 'project' } }),
+      '/stories': (params) => ok(params.get('workspace_id') === ws
+        ? [story(storyId, { modified: '2026-11-19 10:00:00' })]
+        : [story('1164208216001042393', { modified: '2026-11-20 10:00:00' })])
+    })
+    const issues = await client.list({ workspace: `${ws},${other}`, kind: 'story', assignee: '@me', state: 'active' }, signal)
+    expect(issues.map((issue) => [issue.key, issue.type, issue.url])).toEqual([
+      ['story-1164208216001042393', '需求 · 招聘系统', `https://www.tapd.cn/${other}/prong/stories/view/1164208216001042393`],
+      [`story-${storyId}`, '需求 · 商城', `https://www.tapd.cn/${ws}/prong/stories/view/${storyId}`]
+    ])
+    expect(calls.filter((call) => call.path === '/users/info')).toHaveLength(1)
+  })
+
+  it('says which project failed', async () => {
+    const { client } = server({ ...routes, '/stories': (params) => params.get('workspace_id') === ws ? ok([]) : new Response(null, { status: 403 }) })
+    await expect(client.list({ workspace: `${ws},64208216`, kind: 'story', assignee: '', state: 'all' }, signal)).rejects.toMatchObject({ code: 'forbidden', message: expect.stringMatching(/^项目 64208216：/) })
+  })
+
+  it('fetches an item from the project its ID names, or from the next that has it', async () => {
+    const asked: (string | null)[] = []
+    const { client } = server({
+      ...routes,
+      '/stories': (params) => { asked.push(params.get('workspace_id')); return ok(params.get('workspace_id') === '64208216' ? [story('1164208216001042393', { description: 'x' })] : []) },
+      '/attachments': () => ok([]), '/comments': () => ok([])
+    })
+    const source = tapdSource(() => client)
+    const credential = { kind: 'token', payload: { token } }
+    const issue = await source.fetch({ workspace: `${ws},64208216` }, credential, 'story-1164208216001042393', signal)
+    expect(issue.type).toBe('需求 · 商城')
+    expect(asked).toEqual(['64208216'])
+    asked.length = 0
+    // A 0.1.0 setting names one project; an item pasted from another is still found through its ID.
+    await source.fetch({ workspace: ws }, credential, 'story-1164208216001042393', signal)
+    expect(asked).toEqual([ws, '64208216'])
+  })
+
   it('fetches the description, attachments and comments into a snapshot', async () => {
     const { calls, client } = server({
       ...routes,
@@ -160,7 +214,7 @@ describe('TAPD client', () => {
         { Comment: { id: '501', description: '<p>First</p>', author: 'ann', created: '2026-11-20 11:00:00', modified: '2026-11-20 11:30:00' } }
       ])
     })
-    const issue = await client.issue(ws, 'story', storyId, signal)
+    const issue = await client.issue([ws], 'story', storyId, signal)
     expect(issue.markdown).toContain(`# story-${storyId} Story ${storyId}`)
     expect(issue.markdown).toContain('处理人：ann、bob')
     expect(issue.markdown).toContain('![](https://www.tapd.cn/tfl/captures/a.png)')
@@ -181,7 +235,7 @@ describe('TAPD client', () => {
       '/attachments': () => new Response('no', { status: 403 }),
       '/comments': () => Response.json({ status: 0, info: 'no permission', data: null })
     })
-    const issue = await client.issue(ws, 'bug', '11', signal)
+    const issue = await client.issue([ws], 'bug', '11', signal)
     expect(issue.markdown).toContain('创建人：carl')
     expect(issue.markdown).toContain('附件未能获取')
     expect(issue.markdown).toContain('评论未能获取')
@@ -203,7 +257,7 @@ describe('TAPD client', () => {
 
   it('reports a missing item', async () => {
     const { client } = server({ ...routes, '/stories': () => ok([]) })
-    await expect(client.issue(ws, 'story', '1', signal)).rejects.toMatchObject({ code: 'not-found' })
+    await expect(client.issue([ws], 'story', '1', signal)).rejects.toMatchObject({ code: 'not-found' })
   })
 })
 
@@ -239,6 +293,6 @@ describe('TAPD requests', () => {
     const large = server({ '/users/info': () => new Response('x', { headers: { 'content-length': '9999999' } }) })
     await expect(large.client.user(signal)).rejects.toMatchObject({ code: 'response-too-large' })
     const numeric = server({ ...routes, '/stories': () => ok([{ Story: { id: 1120003271, name: 'x' } }]) })
-    await expect(numeric.client.issue(ws, 'story', storyId, signal)).rejects.toMatchObject({ code: 'request-failed' })
+    await expect(numeric.client.issue([ws], 'story', storyId, signal)).rejects.toMatchObject({ code: 'request-failed' })
   })
 })

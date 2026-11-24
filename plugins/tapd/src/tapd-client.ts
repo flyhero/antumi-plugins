@@ -6,7 +6,7 @@ import {
   type SourceCommentOptions, type SourceCommentPage, type SourceIssue, type SourceIssueDetail, type SourceSettings
 } from '@antumi/plugin-sdk'
 import { category, priorityName, TASK_LAST_STEPS, TASK_STATUSES, typeName } from './tapd-status.js'
-import { API, itemKey, itemUrl, WEB, type ItemKind } from './tapd-url.js'
+import { API, itemKey, itemUrl, parseWorkspaces, WEB, type ItemKind } from './tapd-url.js'
 
 const Text = z.union([z.string(), z.number()]).nullish().transform((value) => value == null ? '' : String(value))
 // IDs are 19 digits, past what a JSON number keeps exact, so only strings are trusted.
@@ -80,30 +80,57 @@ export class TapdClient {
 
   async list(settings: SourceSettings, signal: AbortSignal): Promise<SourceIssue[]> {
     const kind = settings.kind === 'bug' || settings.kind === 'task' ? settings.kind : 'story'
+    const workspaces = parseWorkspaces(settings.workspace ?? '')
     const owner = settings.assignee === '@me' ? (await this.user(signal)).nick : settings.assignee ?? ''
-    const space = await this.workspace(settings.workspace ?? '', signal)
-    const statuses = await this.statuses(space.id, kind, signal)
     const found = new Map<string, SourceIssue>()
-    for (let page = 1; page <= 5 && found.size < 200; page++) {
+    for (const workspace of workspaces) {
+      for (const issue of await this.inProject(workspace, () => this.listProject(workspace, kind, owner, settings.state === 'all', workspaces.length > 1, signal))) found.set(issue.key, issue)
+    }
+    return [...found.values()].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0)).slice(0, 200)
+  }
+
+  private async listProject(workspace: string, kind: ItemKind, owner: string, all: boolean, labelProject: boolean, signal: AbortSignal): Promise<SourceIssue[]> {
+    const space = await this.workspace(workspace, signal)
+    const statuses = await this.statuses(space.id, kind, signal)
+    const found: SourceIssue[] = []
+    for (let page = 1; page <= 5 && found.length < 200; page++) {
       // The server matches people loosely, so the exact match happens here.
       const filter = owner ? { [kind === 'bug' ? 'current_owner' : 'owner']: owner } : {}
       const items = await this.items(kind, { workspace_id: space.id, limit: String(PAGE), page: String(page), order: 'modified desc', ...filter }, signal)
       for (const item of items) {
         if (owner && !people(owners(kind, item)).includes(owner)) continue
-        const issue = this.summary(kind, item, space, statuses)
-        if (settings.state !== 'all' && issue.statusCategory === 'done') continue
-        found.set(issue.key, issue)
+        const issue = this.summary(kind, item, space, statuses, labelProject)
+        if (!all && issue.statusCategory === 'done') continue
+        found.push(issue)
       }
       if (items.length < PAGE) break
     }
-    return [...found.values()].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0)).slice(0, 200)
+    return found
   }
 
-  async issue(workspace: string, kind: ItemKind, id: string, signal: AbortSignal): Promise<SourceIssueDetail> {
-    const item = await this.item(workspace, kind, id, signal)
+  // With several projects, a failure says which one; a bad token is the same for all.
+  private async inProject<T>(workspace: string, run: () => Promise<T>): Promise<T> {
+    try { return await run() } catch (failure) {
+      if (!(failure instanceof SourceError) || failure.code === 'auth-failed') throw failure
+      throw new SourceError(failure.code, `项目 ${workspace}：${failure.message}`)
+    }
+  }
+
+  // Candidates come from workspaceCandidates: an item is looked for in each until one has it.
+  async issue(candidates: readonly string[], kind: ItemKind, id: string, signal: AbortSignal, labelProject = false): Promise<SourceIssueDetail> {
+    let found: { workspace: string, item: Item } | undefined
+    let missing: unknown = new SourceError('not-found', `找不到${typeName[kind]} ${id}`)
+    for (const workspace of candidates) {
+      try { found = { workspace, item: await this.item(workspace, kind, id, signal) }; break } catch (failure) {
+        if (!(failure instanceof SourceError) || (failure.code !== 'not-found' && failure.code !== 'forbidden')) throw failure
+        missing = failure
+      }
+    }
+    if (!found) throw missing
+    const { workspace, item } = found
     const description = item.description ?? (await this.items(kind, { workspace_id: workspace, id, fields: 'id,description' }, signal))[0]?.description ?? ''
     const space = await this.workspace(workspace, signal)
-    const issue = this.summary(kind, item, space, await this.statuses(workspace, kind, signal))
+    const issue = this.summary(kind, item, space, await this.statuses(workspace, kind, signal), labelProject)
     // Comments and attachments are extras; the item itself is what was asked for.
     const comments = await this.comments(workspace, kind, id, issue.url, signal).catch((failure: unknown) => { if (signal.aborted) throw failure; return null })
     const files = await this.attachments(workspace, kind, id, signal).catch((failure: unknown) => { if (signal.aborted) throw failure; return null })
@@ -111,7 +138,7 @@ export class TapdClient {
     const text = [
       `# ${issue.key} ${issue.title}`,
       [
-        `类型：${issue.type}`, `状态：${issue.status}`, ...(issue.priority ? [`优先级：${issue.priority}`] : []),
+        `类型：${typeName[kind]}`, `状态：${issue.status}`, ...(issue.priority ? [`优先级：${issue.priority}`] : []),
         `处理人：${people(owners(kind, item)).join('、') || '无'}`, ...(creator ? [`创建人：${creator}`] : []),
         ...(item.created ? [`创建时间：${item.created}`] : []), ...(item.modified ? [`更新时间：${item.modified}`] : []),
         `项目：${space.name || space.id}`
@@ -128,13 +155,13 @@ export class TapdClient {
     return commentPage(await this.comments(workspace, kind, id, itemUrl(workspace, kind, id, space.lightweight), signal), options)
   }
 
-  private summary(kind: ItemKind, item: Item, space: Space, statuses: { names: Readonly<Record<string, string>>, lastSteps: ReadonlySet<string> | null }): SourceIssue {
+  private summary(kind: ItemKind, item: Item, space: Space, statuses: { names: Readonly<Record<string, string>>, lastSteps: ReadonlySet<string> | null }, labelProject: boolean): SourceIssue {
     const title = item.name || item.title || `${typeName[kind]} ${item.id}`
     return {
       key: itemKey({ kind, id: item.id }), title: title.slice(0, MAX_ISSUE_TITLE_LENGTH),
       url: itemUrl(space.id, kind, item.id, space.lightweight),
       status: (statuses.names[item.status] || item.status || '未知').slice(0, 100), statusCategory: category(item.status, statuses.lastSteps),
-      type: typeName[kind], priority: priorityName(item.priority_label, item.priority), updatedAt: time(item.modified || item.created)
+      type: (labelProject ? `${typeName[kind]} · ${space.name || space.id}` : typeName[kind]).slice(0, 100), priority: priorityName(item.priority_label, item.priority), updatedAt: time(item.modified || item.created)
     }
   }
 

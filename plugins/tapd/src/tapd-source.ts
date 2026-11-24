@@ -1,6 +1,6 @@
 import { SourceError, type SourceCredential, type SourcePlugin } from '@antumi/plugin-sdk'
 import { TapdClient } from './tapd-client.js'
-import { itemKey, itemKind, itemRef, parseKey, parseWorkspace } from './tapd-url.js'
+import { itemKey, itemKind, itemRef, parseKey, parseWorkspaces, workspaceCandidates } from './tapd-url.js'
 
 function token(credential: SourceCredential): string {
   if (credential.kind !== 'token' || !credential.payload.token) throw new SourceError('not-configured', '请先登录 TAPD')
@@ -11,7 +11,7 @@ export function tapdSource(connect = (key: string) => new TapdClient(key)): Sour
   return {
     id: 'tapd',
     normalizeSettings(values) {
-      const workspace = parseWorkspace(values.workspace ?? '')
+      const workspace = parseWorkspaces(values.workspace ?? '').join(',')
       const kind = itemKind(values.kind || 'story')
       if (!kind) throw new SourceError('invalid-settings', '不支持的 TAPD 事项类型')
       const assignee = values.assignee === undefined ? '@me' : values.assignee.trim()
@@ -43,11 +43,13 @@ export function tapdSource(connect = (key: string) => new TapdClient(key)): Sour
     list: (settings, credential, signal) => connect(token(credential)).list(settings, signal),
     fetch(settings, credential, key, signal) {
       const { kind, id } = parseKey(key)
-      return connect(token(credential)).issue(parseWorkspace(settings.workspace ?? ''), kind, id, signal)
+      const workspaces = parseWorkspaces(settings.workspace ?? '')
+      return connect(token(credential)).issue(workspaceCandidates(id, workspaces), kind, id, signal, workspaces.length > 1)
     },
     comments(settings, credential, key, signal, options) {
       const { kind, id } = parseKey(key)
-      return connect(token(credential)).commentChanges(parseWorkspace(settings.workspace ?? ''), kind, id, signal, options)
+      const [workspace = ''] = workspaceCandidates(id, parseWorkspaces(settings.workspace ?? ''))
+      return connect(token(credential)).commentChanges(workspace, kind, id, signal, options)
     }
   }
 }

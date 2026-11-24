@@ -1,6 +1,6 @@
 {
   "id": "antumi.tapd",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "engines": {
     "antumi": ">=0.15.11 <1.0.0"
   },
@@ -18,11 +18,11 @@
             "required": true,
             "mono": true,
             "placeholder": "https://www.tapd.cn/12345678/prong/stories/stories_list",
-            "hint": "填写项目 ID，或在项目里打开任意页面，复制浏览器地址栏的地址。",
+            "hint": "填写项目 ID，或在项目里打开任意页面，复制浏览器地址栏的地址。同时跟进多个项目时用逗号分隔，最多 10 个。",
             "translations": {
               "en": {
                 "label": "Project",
-                "hint": "The project ID, or the address of any page in the project."
+                "hint": "The project ID, or the address of any page in the project. Separate several projects with commas, up to 10."
               }
             }
           },
