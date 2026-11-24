@@ -8,6 +8,12 @@ function token(credential: SourceCredential): string {
   return credential.payload.token
 }
 
+function issueKey(key: string): string {
+  const normalized = key.trim().toUpperCase()
+  if (!KEY.test(normalized)) throw new SourceError('not-found', '无效的 Linear 事项编号')
+  return normalized
+}
+
 export function linearSource(connect = (key: string) => new LinearClient(key)): SourcePlugin {
   return {
     id: 'linear',
@@ -33,9 +39,9 @@ export function linearSource(connect = (key: string) => new LinearClient(key)): 
       for (let attempt = 0; attempt < 3; attempt++) {
         const key = (await session.prompt({
           kind: 'secret', label: 'Linear API Key', error,
-          hint: '创建具有 Read 权限的个人 API Key，可限制为指定团队。',
+          hint: '创建具有 Read 和 Write 权限的个人 API Key，可限制为指定团队；只有 Read 权限时仍可同步，但不能回写状态和评论。',
           link: { url: 'https://linear.app/settings/account/security', label: '创建 API Key' },
-          translations: { en: { hint: 'Create a personal API key with Read access; optionally restrict it to specific teams.' } }
+          translations: { en: { hint: 'Create a personal API key with Read and Write access; optionally restrict it to specific teams. A Read-only key still syncs but cannot write statuses or comments back.' } }
         })).trim()
         if (!key) { error = 'API Key 不能为空'; continue }
         try {
@@ -50,10 +56,9 @@ export function linearSource(connect = (key: string) => new LinearClient(key)): 
     },
     comments: (_settings, credential, key, signal, options) => connect(token(credential)).commentChanges(key, signal, options),
     list: (settings, credential, signal) => connect(token(credential)).list(settings, signal),
-    fetch: (settings, credential, key, signal) => {
-      const normalized = key.trim().toUpperCase()
-      if (!KEY.test(normalized)) throw new SourceError('not-found', '无效的 Linear 事项编号')
-      return connect(token(credential)).issue(normalized, signal)
-    }
+    fetch: (settings, credential, key, signal) => connect(token(credential)).issue(issueKey(key), signal),
+    transitions: async (_settings, credential, key, signal) => connect(token(credential)).transitions(issueKey(key), signal),
+    transition: async (_settings, credential, key, id, signal) => connect(token(credential)).transition(issueKey(key), id, signal),
+    comment: async (_settings, credential, key, { markdown, writeId }, signal) => connect(token(credential)).comment(issueKey(key), markdown, writeId, signal)
   }
 }
