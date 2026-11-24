@@ -41,9 +41,9 @@ export function meegleSource(connect = (host: string, key: string) => new Meegle
       for (let attempt = 0; attempt < 3; attempt++) {
         const value = (await session.prompt({
           kind: 'secret', label: 'MCP Token', placeholder: 'm-…', error,
-          hint: '在 MCP 配置页打开个人偏好里的 MCP 开关，数据权限只勾「允许查看数据信息」，然后复制 Token。',
+          hint: '在 MCP 配置页打开个人偏好里的 MCP 开关，数据权限勾选「允许查看数据信息」；要在 Antumi 里改状态、发评论，再勾选「允许创建或修改数据信息」。然后复制 Token。',
           link: { url: page, label: '打开 MCP 配置页', translations: { en: { label: 'Open MCP settings' } } },
-          translations: { en: { label: 'MCP token', hint: 'On the MCP settings page, turn on MCP in your personal preferences, allow viewing data only, then copy the token.' } }
+          translations: { en: { label: 'MCP token', hint: 'On the MCP settings page, turn on MCP in your personal preferences and allow viewing data; to change statuses and post comments from Antumi, also allow creating or editing data. Then copy the token.' } }
         })).trim()
         if (!TOKEN.test(value)) { error = 'Token 应以 m- 开头，请从 MCP 配置页复制'; continue }
         try {
@@ -63,6 +63,18 @@ export function meegleSource(connect = (host: string, key: string) => new Meegle
     async fetch(settings, credential, key, signal) {
       const { space, client: meegle } = client(settings, credential)
       return meegle.issue(space, itemId(key), signal)
+    },
+    async transitions(settings, credential, key, signal) {
+      const { space, client: meegle } = client(settings, credential)
+      return meegle.transitions(space, itemId(key), signal)
+    },
+    async transition(settings, credential, key, id, signal) {
+      const { space, client: meegle } = client(settings, credential)
+      return meegle.transition(space, itemId(key), id, signal)
+    },
+    async comment(settings, credential, key, { markdown, writeId }, signal) {
+      const { space, client: meegle } = client(settings, credential)
+      return meegle.comment(space, itemId(key), markdown, writeId, signal)
     }
   }
 }

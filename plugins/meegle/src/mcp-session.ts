@@ -18,7 +18,18 @@ const sleep: Sleep = (ms, signal) => new Promise((resolve, reject) => {
   signal.addEventListener('abort', () => { clearTimeout(timer); reject(new SourceError('request-failed', '请求已取消')) }, { once: true })
 })
 
-class Retry extends Error {}
+// unsent: the server turned the request away before reading it, so even a write may go again.
+class Retry extends Error {
+  constructor(message: string, readonly unsent = false) { super(message) }
+}
+
+export type CallOptions = { write?: boolean }
+
+// Comment IDs may pass 2^53; an integer JSON would round is kept as its digits.
+export function parseJson(text: string): unknown {
+  return JSON.parse(text, (_key: string, value: unknown, context?: { source?: string }) =>
+    typeof value === 'number' && !Number.isSafeInteger(value) && context?.source && /^-?\d+$/.test(context.source) ? context.source : value)
+}
 
 // A field or option label the space does not have, named when the server says which.
 export class UnknownField extends SourceError {
@@ -31,7 +42,7 @@ export function parseFrame(body: string): unknown {
   for (const line of body.split('\n')) {
     const text = line.replace(/\r$/, '').replace(/^data:\s*/, '').trim()
     if (!text.startsWith('{')) continue
-    try { last = JSON.parse(text) } catch { /* a partial line */ }
+    try { last = parseJson(text) } catch { /* a partial line */ }
   }
   if (last === undefined) throw new SourceError('request-failed', '飞书项目返回了无法识别的数据')
   return last
@@ -54,13 +65,17 @@ export class McpSession {
 
   constructor(private readonly host: string, private readonly token: string, private readonly fetchImpl: typeof fetch = fetch, private readonly wait: Sleep = sleep) {}
 
-  async call(name: string, args: Record<string, unknown>, signal: AbortSignal): Promise<unknown> {
+  // A write goes again only when the server never read it: a busy server may have done it already.
+  async call(name: string, args: Record<string, unknown>, signal: AbortSignal, options: CallOptions = {}): Promise<unknown> {
     for (let attempt = 0; ; attempt++) {
+      let sent = false
       try {
         if (!this.session) await this.open(signal)
-        return await this.tool(name, args, signal)
+        sent = true
+        return await this.tool(name, args, signal, options)
       } catch (failure) {
-        if (!(failure instanceof Retry) || attempt >= RETRY_DELAYS.length) throw failure instanceof Retry ? new SourceError('request-failed', failure.message) : failure
+        const again = failure instanceof Retry && attempt < RETRY_DELAYS.length && (!options.write || !sent || failure.unsent)
+        if (!again) throw failure instanceof Retry ? new SourceError('request-failed', failure.message) : failure
         await this.wait(RETRY_DELAYS[attempt] ?? 0, signal)
       }
     }
@@ -74,7 +89,7 @@ export class McpSession {
     await this.post({ jsonrpc: '2.0', method: 'notifications/initialized' }, signal).catch(() => undefined)
   }
 
-  private async tool(name: string, args: Record<string, unknown>, signal: AbortSignal): Promise<unknown> {
+  private async tool(name: string, args: Record<string, unknown>, signal: AbortSignal, options: CallOptions): Promise<unknown> {
     const { body } = await this.post({ jsonrpc: '2.0', id: this.nextId++, method: 'tools/call', params: { name, arguments: args } }, signal)
     const reply = Reply.safeParse(parseFrame(body))
     if (!reply.success) throw new SourceError('request-failed', '飞书项目返回了无法识别的数据')
@@ -85,9 +100,11 @@ export class McpSession {
     for (const text of texts) {
       const trimmed = text.trim()
       if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) continue
-      try { return JSON.parse(trimmed) } catch { /* the log id may be appended to the payload */ }
-      try { return JSON.parse(trimmed.replace(/\s*log_?id:\s*\S+\s*$/, '')) } catch { /* not this block */ }
+      try { return parseJson(trimmed) } catch { /* the log id may be appended to the payload */ }
+      try { return parseJson(trimmed.replace(/\s*log_?id:\s*\S+\s*$/, '')) } catch { /* not this block */ }
     }
+    // A write may answer in words rather than JSON; it succeeded all the same.
+    if (options.write) return texts.filter((text) => !isLogId(text)).join('\n').replace(/\s*log_?id:\s*\S+\s*$/, '').trim()
     throw new SourceError('request-failed', `飞书项目的 ${name} 没有返回可读的结果`)
   }
 
@@ -125,11 +142,11 @@ export class McpSession {
     if (response.status === 404 && this.session) {
       await response.body?.cancel()
       this.session = undefined
-      throw new Retry('飞书项目的 MCP 会话已失效')
+      throw new Retry('飞书项目的 MCP 会话已失效', true)
     }
     if (response.status === 429 || response.status >= 500) {
       await response.body?.cancel()
-      throw new Retry(`飞书项目暂时不可用（HTTP ${response.status}）`)
+      throw new Retry(`飞书项目暂时不可用（HTTP ${response.status}）`, response.status === 429)
     }
     if (!response.ok) {
       await response.body?.cancel()

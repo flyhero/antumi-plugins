@@ -1,10 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
 import { SourceError } from '@antumi/plugin-sdk'
-import { McpSession, parseFrame, toolFailure } from './mcp-session.js'
+import { McpSession, parseFrame, parseJson, toolFailure } from './mcp-session.js'
 import { MeegleClient } from './meegle-client.js'
 import { buildMql, day, DEFAULT_FILTER, normalizeFilter } from './meegle-mql.js'
 import { meegleSource } from './meegle-source.js'
 import { itemId, parseSpace } from './meegle-url.js'
+import { commentMarkdown } from './meegle-writeback.js'
 
 const signal = new AbortController().signal
 const token = 'm-12345678-aaaa-bbbb-cccc-1234567890ab'
@@ -24,7 +25,8 @@ function server(tools: Record<string, Tool>, options: { sse?: boolean } = {}) {
     const tool = tools[body.params.name]
     if (!tool) throw new Error(`unexpected tool ${body.params.name}`)
     let result: unknown
-    try { result = { content: [{ type: 'text', text: JSON.stringify(tool(body.params.arguments)) }, { type: 'text', text: 'log_id: 2026abc' }] } }
+    // A string is sent as the tool's own text, the way a write may answer.
+    try { const out = tool(body.params.arguments); result = { content: [{ type: 'text', text: typeof out === 'string' ? out : JSON.stringify(out) }, { type: 'text', text: 'log_id: 2026abc' }] } }
     catch (failure) { result = { isError: true, content: [{ type: 'text', text: String(failure instanceof Error ? failure.message : failure) }, { type: 'text', text: 'log_id: 2026err' }] } }
     const reply = JSON.stringify({ jsonrpc: '2.0', id: body.id, result })
     return options.sse ? new Response(`event: message\ndata: ${reply}\n\n`, { headers: { 'content-type': 'text/event-stream' } }) : new Response(reply)
@@ -229,5 +231,126 @@ describe('source', () => {
     expect(hosts).toEqual(['project.larksuite.com'])
     const moved = { ...settings, space: 'https://project.feishu.cn/shop' }
     await expect(source.list(moved, result.credential, signal)).rejects.toMatchObject({ code: 'not-configured' })
+  })
+})
+
+describe('writeback', () => {
+  const credential = { kind: 'token' as const, payload: { token, host: space.host } }
+  const attribute = (extra: object = {}) => ({
+    work_item_name: 'Fix login', work_item_type: { key: 'issue', name: 'Defect', api_name: 'issue' }, owned_project: { key: '63ab', simple_name: 'shop' },
+    work_item_status: { key: 'OPEN', name: '待处理' }, ...extra
+  })
+  const brief = (status = { key: 'OPEN', name: '待处理' }, nodes: object[] = []) => () => ({ work_item_attribute: attribute({ work_item_status: status }), work_item_current_node: nodes, work_item_fields: [], pagination: { has_more: true, next_page_token: 'p2' } })
+  const me = () => [{ user_key: '7001', name_cn: '安' }]
+  const states = () => [
+    { id: 24640610, state_name: '待处理', state_key: 'OPEN' },
+    { id: 24640619, state_name: '处理中', state_key: 'IN PROGRESS' },
+    { id: '24640620', state_name: '已完成', state_key: 'DONE' }
+  ]
+  const source = (session: McpSession) => meegleSource(() => new MeegleClient(session))
+
+  it('lists the next states of a state flow, leaving out the current one', async () => {
+    const { session, calls } = server({ get_workitem_brief: brief(), search_user_info: me, get_transitable_states: states })
+    expect(await source(session).transitions?.(settings, credential, '#12', signal)).toEqual({
+      status: '待处理', statusCategory: 'unknown',
+      options: [{ id: 'state:24640619', name: '处理中', category: 'unknown' }, { id: 'state:24640620', name: '已完成', category: 'unknown' }]
+    })
+    expect(calls.map((call) => call.name)).toEqual(['get_workitem_brief', 'search_user_info', 'get_transitable_states'])
+    expect(calls[2]?.args).toEqual({ project_key: '63ab', work_item_id: '12', work_item_type: 'issue', user_key: '7001' })
+  })
+
+  it('reads transitions wrapped in data and calls an aborted item done', async () => {
+    const { session } = server({
+      get_workitem_brief: () => ({ work_item_attribute: attribute({ is_aborted: true, work_item_status: { key: 'CLOSED', name: '已关闭' } }) }),
+      search_user_info: me, get_transitable_states: () => ({ data: [{ id: 5, state_name: '重新打开', state_key: 'REOPEN' }] })
+    })
+    expect(await source(session).transitions?.(settings, credential, '12', signal)).toEqual({ status: '已关闭', statusCategory: 'done', options: [{ id: 'state:5', name: '重新打开', category: 'unknown' }] })
+  })
+
+  it('moves a state flow by a listed transition and reads the status back', async () => {
+    let status = { key: 'OPEN', name: '待处理' }
+    const { session, calls } = server({
+      get_workitem_brief: () => brief(status)(), search_user_info: me, get_transitable_states: states,
+      transition_state: (args) => { status = { key: 'IN PROGRESS', name: '处理中' }; return args.transition_id === '24640619' ? 'success' : 'bad' }
+    })
+    expect(await source(session).transition?.(settings, credential, '12', 'state:24640619', signal)).toEqual({ status: '处理中', statusCategory: 'unknown' })
+    expect(calls.find((call) => call.name === 'transition_state')?.args).toEqual({ project_key: '63ab', work_item_id: '12', transition_id: '24640619' })
+    expect(calls.filter((call) => call.name === 'get_workitem_brief').every((call) => !call.args.page_token)).toBe(true)
+  })
+
+  it('refuses an id the issue cannot take now', async () => {
+    const { session, calls } = server({ get_workitem_brief: brief(), search_user_info: me, get_transitable_states: states, transition_state: () => 'success' })
+    for (const id of ['state:24640610', 'state:999', 'node:dev', 'whatever']) {
+      await expect(source(session).transition?.(settings, credential, '12', id, signal)).rejects.toMatchObject({ code: 'request-failed', message: expect.stringContaining('不能流转') })
+    }
+    expect(calls.some((call) => call.name === 'transition_state')).toBe(false)
+  })
+
+  it('offers completing the nodes in progress for a node flow', async () => {
+    const { session, calls } = server({
+      get_workitem_brief: brief({ key: 'started', name: '进行中' }, [{ name: '开发' }]),
+      get_node_detail: () => ({ nodes: [{ node_key: 'state_dev', name: '开发', status: 'doing' }, { node_key: 'state_test', name: '测试', status: 'not_started' }] }),
+      transition_node: () => ({})
+    })
+    const plugin = source(session)
+    expect(await plugin.transitions?.(settings, credential, '12', signal)).toEqual({
+      status: '进行中', statusCategory: 'unknown', options: [{ id: 'node:state_dev', name: '「开发」已完成', action: '完成节点「开发」', category: 'unknown' }]
+    })
+    expect(calls[1]?.args).toMatchObject({ project_key: '63ab', work_item_id: '12', node_id_list: ['开发'] })
+    await plugin.transition?.(settings, credential, '12', 'node:state_dev', signal)
+    expect(calls.find((call) => call.name === 'transition_node')?.args).toEqual({ project_key: '63ab', work_item_id: '12', node_id: 'state_dev', action: 'confirm' })
+  })
+
+  it('posts Markdown as it is and returns the comment ID comment listings use', async () => {
+    const { session, calls } = server({ get_workitem_brief: brief(), add_comment: () => '{"comment_id":7301234567890123456}' })
+    const result = await source(session).comment?.(settings, credential, '12', { markdown: 'Done.\r\n\r\n- [PR](https://x/1)\n- `a<!--b-->`\n\n```\n<!-- kept -->\n```\n<!-- mention:{"id":"7001"} -->', writeId: 'w-1' }, signal)
+    expect(result).toEqual({ id: '7301234567890123456', url: 'https://project.larksuite.com/shop/issue/detail/12' })
+    expect(calls[1]?.args).toEqual({ project_key: '63ab', work_item_id: '12', content: 'Done.\n\n- [PR](https://x/1)\n- `a<!--b-->`\n\n```\n<!-- kept -->\n```' })
+  })
+
+  it('finds the comment it posted when add_comment does not name it', async () => {
+    const { session, calls } = server({
+      get_workitem_brief: brief(), add_comment: () => 'success',
+      list_workitem_comments: () => ({ comments: [{ id: 41, content: 'Done', created_at: 1 }, { id: 42, content: ' Done ', created_at: 2 }, { id: 43, content: 'Other', created_at: 3 }] })
+    })
+    expect(await source(session).comment?.(settings, credential, '12', { markdown: 'Done', writeId: 'w-1' }, signal)).toMatchObject({ id: '42' })
+    expect(calls.map((call) => call.name)).toEqual(['get_workitem_brief', 'add_comment', 'list_workitem_comments'])
+  })
+
+  it('asks for a token with write permission and never retries a write', async () => {
+    const denied = server({ get_workitem_brief: brief(), add_comment: () => { throw new Error('error=ErrWorkItemNoPermission,message=No Permission,retriable=false') } })
+    const failure = source(denied.session).comment?.(settings, credential, '12', { markdown: 'Done', writeId: 'w-1' }, signal)
+    await expect(failure).rejects.toMatchObject({ code: 'forbidden', message: expect.stringContaining('允许创建或修改数据信息') })
+    await expect(failure).rejects.not.toThrow(token)
+
+    const rejected = new McpSession(space.host, token, vi.fn<typeof fetch>(async (url, init) => JSON.parse(String(init?.body)).params?.name === 'add_comment' ? new Response('{}', { status: 403 }) : denied.fetcher(url, init)), async () => {})
+    await expect(new MeegleClient(rejected).comment(space, '12', 'Done', 'w-1', signal)).rejects.toMatchObject({ code: 'forbidden', message: expect.stringContaining('重新登录') })
+
+    const busy = server({ get_workitem_brief: brief(), add_comment: () => { throw new Error('error=RPCError,message=busy,retriable=true') } })
+    await expect(source(busy.session).comment?.(settings, credential, '12', { markdown: 'Done', writeId: 'w-1' }, signal)).rejects.toMatchObject({ code: 'request-failed' })
+    expect(busy.calls.filter((call) => call.name === 'add_comment')).toHaveLength(1)
+
+    // An expired session never read the request, so the write goes once more on a new one.
+    let expired = true
+    const inner = server({ get_workitem_brief: brief(), add_comment: () => ({ comment_id: 9 }) })
+    const expiring = vi.fn<typeof fetch>(async (url, init) => {
+      if (JSON.parse(String(init?.body)).params?.name === 'add_comment' && expired) { expired = false; return new Response(null, { status: 404 }) }
+      return inner.fetcher(url, init)
+    })
+    expect(await new MeegleClient(new McpSession(space.host, token, expiring, async () => {})).comment(space, '12', 'Done', 'w-1', signal)).toMatchObject({ id: '9' })
+    expect(inner.calls.filter((call) => call.name === 'add_comment')).toHaveLength(1)
+  })
+
+  it('reports a missing item and an empty comment', async () => {
+    const missing = server({ get_workitem_brief: () => { throw new Error('error=WorkItemNotFound,message=gone,retriable=false') } })
+    await expect(source(missing.session).transitions?.(settings, credential, '12', signal)).rejects.toMatchObject({ code: 'not-found' })
+    const { session, calls } = server({ get_workitem_brief: brief() })
+    await expect(source(session).comment?.(settings, credential, '12', { markdown: '<!-- only -->', writeId: 'w-1' }, signal)).rejects.toMatchObject({ code: 'request-failed' })
+    expect(calls).toHaveLength(0)
+  })
+
+  it('keeps integers too large for a double as their digits', () => {
+    expect(parseJson('{"id":7301234567890123456,"n":12}')).toEqual({ id: '7301234567890123456', n: 12 })
+    expect(commentMarkdown('a <!-- open')).toBe('a')
   })
 })

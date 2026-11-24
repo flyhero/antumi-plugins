@@ -7,7 +7,7 @@
 **做**：把一个 Meegle 空间里的工作项同步进 Antumi 的收件箱，导入成任务，拉取详情（标题、状态、优先级、负责人、描述、最近评论）。配合 Antumi 已有的「新问题自动排查」，工作项一进入查询结果，就自动开排查会话。
 
 **不做（v1）**：
-- 写回 Meegle：不流转节点，不改字段，不发评论。
+- 写回 Meegle：v1 不做；0.2.0 起支持流转状态、完成节点和发评论，见第 11 节。
 - 评论增量同步（`commentSync`）和图片下载：等真实空间确认返回格式后再做（见第 9 节）。
 - 私有部署的自定义域名：只接受三个官方域名，Token 不会被发到任意地址。
 - Lark 文档、知识库、多维表格：它们走 Lark 开放平台，和 Meegle 是两套体系。他自己用的智能体可以配 Lark 官方的 `@larksuiteoapi/lark-mcp`；群里 @ 的机器人要读这些内容，得在 core 加工具并设计好按提问人的权限限制，另开 issue 讨论。
@@ -212,3 +212,34 @@
   3. 打 `meegle-v0.1.0` 标签发布
   4. 主仓库加推荐条目和 CHANGELOG
   5. 第二期：评论同步和图片
+
+## 11. 回写（0.2.0）
+
+按 Antumi 的[来源回写](https://github.com/flyhero/antumi/blob/main/docs/SOURCE-WRITEBACK.md)协议实现 `transitions`、`transition`、`comment`，manifest 声明 `writeback: 1`。
+
+| 方法 | 调用 |
+|---|---|
+| `transitions` | `get_workitem_brief`（第一页）取当前状态、类型、`owned_project.key` 和当前节点。状态流：`search_user_info` 取 `user_key`，再 `get_transitable_states {project_key, work_item_id, work_item_type, user_key}`，去掉当前状态，选项 ID 为 `state:<transition_id>`。节点流：`get_node_detail {node_id_list:[当前节点名]}`，取 `status=doing` 的节点，选项 ID 为 `node:<node_key>`，名称「「X」已完成」，动作「完成节点「X」」 |
+| `transition` | 先重做一次 `transitions`，ID 不在其中就拒绝；状态流 `transition_state {project_key, work_item_id, transition_id}`，节点流 `transition_node {…, node_id, action:"confirm"}`；然后重读 `get_workitem_brief` 返回新状态 |
+| `comment` | `add_comment {project_key, work_item_id, content}`，`content` 是 Markdown（编辑器基于 GFM）。去掉代码以外的 HTML 注释，避免正文里的 `<!-- mention -->` 之类被当成元数据。评论 ID 取返回里的 `comment_id`/`id`；没有就在 `list_workitem_comments` 第一页按正文找最新的一条；仍找不到时用 `antumi-<writeId>` |
+
+- 分类：飞书项目的状态是空间自定义的，没有可靠的分类，一律 `unknown`；已终止的工作项为 `done`，和同步一致。
+- 写工具不自动重试：服务端忙（`retriable=true`、1606、5xx）时可能已经写入。只有会话过期（404）和 429 这两种服务端没读请求的情况会重发。
+- 写入时的「没有权限」统一提示勾选「允许创建或修改数据信息」后重新登录，同时提醒飞书项目里的角色权限（有的空间只允许经办人、报告人改状态，报 `ErrWorkItemNoPermission`）。
+- 超过 2^53 的整数（评论 ID 可能如此）在解析 JSON 时保留原样的数字串。
+
+依据：`larksuite/meegle-cli` 的工具映射（`dynamic/mapper.go`、`risk.go`）和 `skills/meegle` 的 SOP；`About-JayX/dimweave` 在 project.feishu.cn 上实测的 `get_transitable_states` 返回（`[{id, state_name, state_key}]`）和 `transition_state` 参数。
+
+还需要真实账号确认：
+
+| 项 | 现在的假设 |
+|---|---|
+| `add_comment` 的正文参数名 | `content`（meegle-cli 的 `--content`；有第三方文档写作 `comment_content`） |
+| `add_comment` 的返回 | 可能带 `comment_id`，也可能只是文字；都没有时按正文回查 |
+| `list_workitem_comments` 每条评论的 ID 字段 | `id` |
+| 状态流和节点流的区分 | `work_item_attribute.pattern`；没有时看 `work_item_current_node` 是否为空 |
+| `get_node_detail` 的返回 | 节点数组（或在 `nodes`/`list`/`data` 下），每个有 `node_key`、`name`、`status` |
+| `transition_state`、`transition_node` 的成功返回 | 任意内容，不解析；新状态靠重读 |
+| `project_key` 用 `owned_project.key` | 写工具接受真正的 key（读工具实测接受 simple_name） |
+| 只读 Token 写入时的错误 | `NoPermission` 一类错误码或 HTTP 403 |
+
