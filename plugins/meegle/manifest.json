@@ -1,6 +1,6 @@
 {
   "id": "antumi.meegle",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "engines": {
     "antumi": ">=0.15.11 <1.0.0"
   },
@@ -10,6 +10,7 @@
         "id": "meegle",
         "name": "飞书项目 / Meegle",
         "writeback": 1,
+        "writebackRules": {"start": {"placeholder": "如：处理中", "hint": "节点流的工作项填动作名，如「完成节点「开发」」。飞书项目的状态没有分类，「不会把状态往回改」对它不生效（已终止的工作项除外）。", "translations": {"en": {"placeholder": "e.g. 处理中", "hint": "For node-flow items, enter the action, e.g. 完成节点「开发」. Meegle statuses have no categories, so “never moved backwards” does not hold here (except for terminated items)."}}}, "review": {"placeholder": "如：待验收", "translations": {"en": {"placeholder": "e.g. 待验收"}}}, "done": {"placeholder": "如：已完成", "translations": {"en": {"placeholder": "e.g. 已完成"}}}},
         "settings": [
           {
             "key": "space",
