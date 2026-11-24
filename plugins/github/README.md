@@ -12,7 +12,14 @@
 - 按 `owner/repository#123` 导入，原文快照包含正文、标签和最近 20 条评论，支持重新拉取。
 - 导入和排查时下载正文、最近评论里的图片；新增评论的图片在交给 Agent 时下载。图片较慢时先读取文字，下载后补发。
 
-Token 需要读取账号及目标仓库 Issues / Pull Requests 的权限。具体可见范围由 GitHub 的 Token 类型、仓库访问和组织授权共同决定。插件只读，不修改远端事项。
+Token 需要读取账号及目标仓库 Issues / Pull Requests 的权限。具体可见范围由 GitHub 的 Token 类型、仓库访问和组织授权共同决定。只有回写会修改远端事项，见下文。
+
+## 回写
+
+- 在 Antumi 里修改事项状态、发评论。Issue 可以「Close as completed」「Close as not planned」，已关闭的可以 Reopen；Pull Request 只能关闭或重新打开，不能合并，已合并的不能再打开。
+- 评论按 Markdown 原样发出，评论同步读回时认作 Antumi 自己发的，不算新评论。
+- 写入需要写权限：Fine-grained Token 需要 Issues 读写（回写 Pull Request 状态还需要 Pull requests 读写）；Classic Token 需要 `repo`，只用公开仓库时 `public_repo` 即可。
+- 只读 Token 照常同步，写入时报「没有权限」；换一个有写权限的 Token 重新登录即可。已锁定的事项只有协作者能评论。
 
 ## 图片
 

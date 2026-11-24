@@ -2,6 +2,7 @@
 
 ## 1.2.0（未发布）
 
+- 支持回写：在 Antumi 里关闭或重新打开 Issue / Pull Request、发评论（需要有写权限的 Token）。
 - 导入或排查 GitHub Issues / Pull Requests 时，可下载正文和最近评论里的图片；新增评论的图片也可交给 Agent 查看。
 - 图片慢时先读取文字、下载后补发；图片无法下载时保留原文并说明结果。
 

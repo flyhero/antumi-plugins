@@ -42,12 +42,12 @@ export function githubProvider(connect: (credentials: GitHubCredentials) => GitH
         const token = (
           await session.prompt({
             translations: { en: {
-              hint: 'Needs access to your account and issues in accessible repositories. Your token stays on this computer and is never shared with Agents.',
+              hint: 'Needs access to your account and issues in accessible repositories; writing statuses and comments back also needs Issues (and Pull requests) write access. Your token stays on this computer and is never shared with Agents.',
               ...(error ? { error: 'Personal access token is invalid. Try again' } : {})
             } },
             kind: 'secret',
             label: 'Personal access token',
-            hint: '需要读取账号和可访问仓库的 issue。token 只保存在本机，不会交给 Agent。',
+            hint: '需要读取账号和可访问仓库的 issue；回写状态和评论还需要 Issues（及 Pull requests）的写权限。token 只保存在本机，不会交给 Agent。',
             link: { url: TOKEN_PAGE, label: '在 GitHub 设置里创建', translations: { en: { label: 'Create in GitHub settings' } } },
             error
           })
@@ -71,6 +71,22 @@ export function githubProvider(connect: (credentials: GitHubCredentials) => GitH
       const api = client(githubCredentials(credential))
       if (!api.commentImage) throw new SourceError('request-failed', 'Comment images are unavailable')
       return api.commentImage(key, id, signal)
+    },
+    transitions: (_settings, credential, key, signal) => {
+      const api = client(githubCredentials(credential))
+      if (!api.transitions) throw new SourceError('request-failed', 'Writeback is unavailable')
+      return api.transitions(key, signal)
+    },
+    transition: (_settings, credential, key, id, signal) => {
+      const api = client(githubCredentials(credential))
+      if (!api.transition) throw new SourceError('request-failed', 'Writeback is unavailable')
+      return api.transition(key, id, signal)
+    },
+    // GitHub has no idempotency key for comments, so writeId is not passed on.
+    comment: (_settings, credential, key, { markdown }, signal) => {
+      const api = client(githubCredentials(credential))
+      if (!api.comment) throw new SourceError('request-failed', 'Writeback is unavailable')
+      return api.comment(key, markdown, signal)
     },
     list: (settings, credential, signal) => client(githubCredentials(credential)).search(settings.query ?? DEFAULT_GITHUB_QUERY, signal),
 
