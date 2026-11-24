@@ -56,6 +56,25 @@ describe('GitHub writeback', () => {
     ])
   })
 
+  it('moves an issue through its statuses where the repository uses them', async () => {
+    const backlog = { id: 1, name: 'Backlog', category: 'backlog' }
+    const { provider, calls } = github(row({ status: backlog }), () => json(row({ status: { id: 3, name: 'In progress', category: 'started' } })))
+    const transitions = await provider.transitions({}, credential, 'acme/widgets#7', signal)
+    expect(transitions.status).toBe('Backlog')
+    expect(transitions.statusCategory).toBe('todo')
+    expect(transitions.options).toEqual([
+      { id: 'status:Todo', name: 'Todo', category: 'todo' },
+      { id: 'status:In progress', name: 'In progress', category: 'doing' },
+      { id: 'status:In review', name: 'In review', category: 'doing' },
+      { id: 'status:Done', name: 'Done', category: 'done' },
+      { id: 'status:Not planned', name: 'Not planned', category: 'done' }
+    ])
+    expect(await provider.transition({}, credential, 'acme/widgets#7', 'status:In progress', signal)).toEqual({ status: 'In progress', statusCategory: 'doing' })
+    expect(calls.at(-1)?.body).toEqual({ status: 'In progress' })
+    // An id from the open-and-closed list does not apply once the issue has a status.
+    await expect(provider.transition({}, credential, 'acme/widgets#7', 'close:completed', signal)).rejects.toMatchObject({ code: 'request-failed' })
+  })
+
   it('closes a pull request through the pulls endpoint and reads its status back', async () => {
     const { provider, calls } = github(row({ pull_request: { merged_at: null } }), () => json({ number: 7, state: 'closed' }))
     await provider.transition({}, credential, 'acme/widgets#7', 'close', signal)

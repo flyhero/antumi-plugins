@@ -53,6 +53,8 @@ const IssueRow = z.object({
   html_url: z.string(),
   state: z.enum(['open', 'closed']),
   state_reason: z.string().nullish(),
+  // Issue statuses (in preview): present on issues in repositories that use them.
+  status: z.object({ name: z.string(), category: z.string() }).nullish(),
   updated_at: z.string().nullish(),
   body: z.string().nullish(),
   body_html: z.string().nullish(),
@@ -88,6 +90,28 @@ const ISSUE_CLOSES: Move[] = [
 ]
 const PULL_CLOSE: Move = { id: 'close', name: 'closed', action: 'Close', category: 'done', state: 'closed' }
 
+// The statuses Update an issue takes, in a repository that uses issue statuses. Duplicate is left
+// out: it needs the issue this one duplicates.
+const STATUSES = [
+  { name: 'Backlog', category: 'backlog' }, { name: 'Todo', category: 'planned' }, { name: 'In progress', category: 'started' },
+  { name: 'In review', category: 'started' }, { name: 'Done', category: 'completed' }, { name: 'Not planned', category: 'not_planned' }
+] as const
+type StatusMove = { id: string; name: string; category: SourceStatusResult['statusCategory']; status: string }
+
+function statusCategory(category: string): SourceStatusResult['statusCategory'] {
+  if (category === 'backlog' || category === 'planned') return 'todo'
+  if (category === 'started') return 'doing'
+  if (category === 'completed' || category === 'not_planned' || category === 'duplicate') return 'done'
+  return 'unknown'
+}
+
+function statusMoves(row: z.infer<typeof IssueRow>): StatusMove[] | null {
+  if (row.pull_request !== undefined || !row.status) return null
+  const current = row.status.name.toLowerCase()
+  return STATUSES.filter((status) => status.name.toLowerCase() !== current)
+    .map((status) => ({ id: `status:${status.name}`, name: status.name, category: statusCategory(status.category), status: status.name }))
+}
+
 function moves(row: z.infer<typeof IssueRow>): Move[] {
   if (row.pull_request === undefined) return row.state === 'open' ? ISSUE_CLOSES : [REOPEN]
   if (row.state === 'open') return [PULL_CLOSE]
@@ -96,6 +120,7 @@ function moves(row: z.infer<typeof IssueRow>): Move[] {
 }
 
 function statusOf(row: z.infer<typeof IssueRow>): SourceStatusResult {
+  if (row.pull_request === undefined && row.status) return { status: row.status.name, statusCategory: statusCategory(row.status.category) }
   return { status: row.state_reason ?? row.state, statusCategory: row.state === 'open' ? 'todo' : 'done' }
 }
 
@@ -318,12 +343,21 @@ export class GitHubClient implements GitHubApi {
 
   async transitions(key: string, signal: AbortSignal): Promise<SourceTransitions> {
     const row = parse(IssueRow, await this.get(issuePath(key), signal))
+    const statuses = statusMoves(row)
+    if (statuses) return { ...statusOf(row), options: statuses.map(({ id, name, category }) => ({ id, name, category })) }
     return { ...statusOf(row), options: moves(row).map(({ id, name, action, category }) => ({ id, name, action, category })) }
   }
 
   async transition(key: string, id: string, signal: AbortSignal): Promise<SourceStatusResult> {
     const path = issuePath(key)
     const row = parse(IssueRow, await this.get(path, signal))
+    const statuses = statusMoves(row)
+    if (statuses) {
+      const status = statuses.find((candidate) => candidate.id === id)
+      if (!status) throw new SourceError('request-failed', `GitHub 上的 ${key} 现在不能这样改状态，请刷新后重试`)
+      // GitHub closes or reopens the issue to match the status.
+      return statusOf(parse(IssueRow, await this.send('PATCH', path, { status: status.status }, signal)))
+    }
     const move = moves(row).find((candidate) => candidate.id === id)
     if (!move) throw new SourceError('request-failed', `GitHub 上的 ${key} 现在不能这样改状态，请刷新后重试`)
     if (row.pull_request === undefined) {

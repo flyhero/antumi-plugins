@@ -1,5 +1,9 @@
 # 更新日志
 
+## 1.3.0（未发布）
+
+- 用上 GitHub Issue 状态（预览）的仓库，回写可以把 Issue 改为 In progress、In review、Done 等状态。
+
 ## 1.2.1
 
 - Antumi 里不再看不到 GitHub 的回写设置和任务详情里的回写区块（1.2.0 的安装包漏了回写声明）。
