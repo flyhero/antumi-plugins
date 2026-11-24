@@ -1,6 +1,6 @@
 {
   "id": "antumi.jira",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "engines": {
     "antumi": ">=0.20.0-beta.2 <1.0.0"
   },
@@ -8,6 +8,7 @@
     "sources": [
       {
         "id": "jira", "commentSync": 1, "writeback": 1,
+        "writebackRules": {"start": {"presets": [{"value": "In Progress|进行中", "label": "In Progress（进行中）"}], "placeholder": "In Progress | 开始处理", "hint": "可以填状态名，也可以填转换名（如「开始处理」）。转换有必填字段时只能到 Jira 里操作。", "translations": {"en": {"hint": "A status name or a transition name both work. A transition with required fields has to be done in Jira."}}}, "review": {"placeholder": "In Review | 审核中"}, "done": {"presets": [{"value": "Done|完成", "label": "Done（完成）"}], "placeholder": "Done | 完成"}},
         "name": "Jira",
         "settings": [
           {
