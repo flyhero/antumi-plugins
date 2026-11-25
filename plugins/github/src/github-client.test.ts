@@ -76,7 +76,7 @@ describe('GitHubClient', () => {
     )
     const found = await new GitHubClient(credentials, fetch, base).search(assigned, signal)
     expect(found).toHaveLength(102)
-    expect(found[0]).toMatchObject({ key: 'acme/widgets#102', type: 'Pull Request', priority: null })
+    expect(found[0]).toMatchObject({ key: 'acme/widgets#102', type: 'Pull Request', typeId: 'pull-request', priority: null })
     expect(found[1]).toEqual({
       key: 'acme/widgets#1',
       title: 'Work 1',
@@ -84,6 +84,8 @@ describe('GitHubClient', () => {
       status: 'open',
       statusCategory: 'todo',
       type: 'Issue',
+      typeId: 'issue',
+      scope: { id: 'acme/widgets', name: 'acme/widgets' },
       priority: 'P1',
       updatedAt: Date.parse('2026-09-21T08:10:00Z')
     })

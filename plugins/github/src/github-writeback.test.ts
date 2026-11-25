@@ -11,7 +11,11 @@ const row = (overrides: Record<string, unknown> = {}) => ({
   number: 7, title: 'Fix login', html_url: 'https://github.com/acme/widgets/issues/7', state: 'open', state_reason: null, comments: 0, ...overrides
 })
 
-// A GitHub that answers the issue read with current and every write with reply.
+const viewer = { id: '1001', name: 'qingfei' }
+const scope = { id: 'acme/widgets', name: 'acme/widgets' }
+const issueFacts = { viewer, type: { id: 'issue', name: 'Issue' }, scope }
+
+// A GitHub that answers the issue read with current, who the token is, and every write with reply.
 function github(current: Record<string, unknown>, reply: (call: Call) => Response) {
   const calls: Call[] = []
   const fetchImpl: typeof fetch = async (input, init) => {
@@ -19,7 +23,8 @@ function github(current: Record<string, unknown>, reply: (call: Call) => Respons
     calls.push(call)
     expect(init?.redirect).toBe('error')
     expect(init?.signal).toBeDefined()
-    return call.method === 'GET' ? json(current) : reply(call)
+    if (call.method !== 'GET') return reply(call)
+    return call.url.pathname === '/user' ? json({ login: 'qingfei', id: 1001 }) : json(current)
   }
   return { provider: githubProvider(() => new GitHubClient({ token: 'secret' }, fetchImpl)), calls }
 }
@@ -32,19 +37,22 @@ describe('GitHub writeback', () => {
       options: [
         { id: 'close:completed', name: 'completed', action: 'Close as completed', category: 'done' },
         { id: 'close:not_planned', name: 'not_planned', action: 'Close as not planned', category: 'done' }
-      ]
+      ],
+      ...issueFacts
     })
   })
 
   it('offers reopening a closed issue or pull request, but not a merged one', async () => {
     const closed = github(row({ state: 'closed', state_reason: 'not_planned' }), () => json({}))
     expect(await closed.provider.transitions({}, credential, 'acme/widgets#7', signal)).toEqual({
-      status: 'not_planned', statusCategory: 'done', options: [{ id: 'reopen', name: 'open', action: 'Reopen', category: 'todo' }]
+      status: 'not_planned', statusCategory: 'done', options: [{ id: 'reopen', name: 'open', action: 'Reopen', category: 'todo' }], ...issueFacts
     })
     const pull = github(row({ pull_request: { merged_at: null } }), () => json({}))
     expect((await pull.provider.transitions({}, credential, 'acme/widgets#7', signal)).options).toEqual([{ id: 'close', name: 'closed', action: 'Close', category: 'done' }])
     const merged = github(row({ state: 'closed', pull_request: { merged_at: '2026-11-01T00:00:00Z' } }), () => json({}))
-    expect(await merged.provider.transitions({}, credential, 'acme/widgets#7', signal)).toEqual({ status: 'closed', statusCategory: 'done', options: [] })
+    expect(await merged.provider.transitions({}, credential, 'acme/widgets#7', signal)).toEqual({
+      status: 'closed', statusCategory: 'done', options: [], viewer, type: { id: 'pull-request', name: 'Pull Request' }, scope
+    })
   })
 
   it('closes an issue with its reason and reports the status GitHub answers with', async () => {

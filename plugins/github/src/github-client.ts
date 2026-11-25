@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { commentState, commentPage, SourceComment, type SourceCommentState, type SourceCommentOptions, type SourceCommentPage } from '@antumi/plugin-sdk'
-import { MAX_ISSUE_TITLE_LENGTH, MAX_TASK_IMAGES, type SourceIssue, type SourceCommentResult, type SourceStatusResult, type SourceTransitions } from '@antumi/plugin-sdk'
+import { MAX_ISSUE_TITLE_LENGTH, MAX_TASK_IMAGES, type SourceIssue, type SourceCommentResult, type SourceStatusResult, type SourceTransitions, type SourceUser } from '@antumi/plugin-sdk'
 import { SourceError } from './source-error.js'
 import { githubImages, type GitHubImage } from './github-images.js'
 import { downloadGitHubImage } from './github-image-download.js'
@@ -45,7 +45,8 @@ const COMMENT_PAGE_SIZE = 100
 const KIND_QUALIFIER = /(?:^|\s)(?:is|type):(?:issue|pr|pull-request)(?=\s|$)/i
 const KINDS = ['is:issue', 'is:pull-request'] as const
 
-const User = z.object({ login: z.string() })
+// id is read leniently: it only feeds the ownership facts, and must never fail a read that worked without it.
+const User = z.object({ login: z.string(), id: z.number().int().positive().optional().catch(undefined) })
 const Label = z.union([z.string(), z.object({ name: z.string().nullish() })])
 const IssueRow = z.object({
   number: z.number().int().positive(),
@@ -59,6 +60,7 @@ const IssueRow = z.object({
   body: z.string().nullish(),
   body_html: z.string().nullish(),
   user: User.nullish(),
+  assignees: z.array(User).optional().catch(undefined),
   labels: z.array(Label).nullish(),
   comments: z.number().int().nonnegative().nullish(),
   pull_request: z.unknown().optional(),
@@ -117,6 +119,38 @@ function moves(row: z.infer<typeof IssueRow>): Move[] {
   if (row.state === 'open') return [PULL_CLOSE]
   // A merged pull request can no longer be reopened.
   return PullRef.safeParse(row.pull_request).data?.merged_at ? [] : [REOPEN]
+}
+
+const ISSUE = { id: 'issue', name: 'Issue' } as const
+const PULL_REQUEST = { id: 'pull-request', name: 'Pull Request' } as const
+
+function kindOf(row: z.infer<typeof IssueRow>): typeof ISSUE | typeof PULL_REQUEST {
+  return row.pull_request === undefined ? ISSUE : PULL_REQUEST
+}
+
+// By GitHub's numeric id: a login can be renamed.
+function person(user: z.infer<typeof User>): SourceUser | undefined {
+  return user.id === undefined ? undefined : { id: String(user.id), name: user.login }
+}
+
+// Who the issue is with, as GitHub has it; what cannot be told is left out, never guessed. A pull
+// request is its author's, so the author counts as an assignee ahead of anyone it is assigned to.
+function ownershipFacts(row: z.infer<typeof IssueRow>): Pick<SourceTransitions, 'assignees' | 'reporter'> {
+  const author = row.user ? person(row.user) : row.user
+  const reporter = author === undefined ? {} : { reporter: author }
+  if (!row.assignees) return reporter
+  const assigned = row.assignees.map(person)
+  if (row.pull_request !== undefined) {
+    if (author === undefined) return reporter
+    if (author) assigned.unshift(author)
+  }
+  const known = assigned.flatMap((user) => (user ? [user] : []))
+  if (known.length !== assigned.length) return reporter
+  return { ...reporter, assignees: [...new Map(known.map((user) => [user.id, user])).values()] }
+}
+
+function rateLimited(response: Response, message: string): boolean {
+  return response.status === 403 && (response.headers.get('x-ratelimit-remaining') === '0' || response.headers.has('retry-after') || /rate limit/i.test(message))
 }
 
 function statusOf(row: z.infer<typeof IssueRow>): SourceStatusResult {
@@ -211,7 +245,9 @@ function summarize(repository: string, row: z.infer<typeof IssueRow>): SourceIss
     title: (row.title ?? '').slice(0, MAX_ISSUE_TITLE_LENGTH),
     url: row.html_url,
     ...statusOf(row),
-    type: row.pull_request === undefined ? 'Issue' : 'Pull Request',
+    type: kindOf(row).name,
+    typeId: kindOf(row).id,
+    scope: { id: repository, name: repository },
     priority,
     updatedAt: time(row.updated_at)
   }
@@ -243,9 +279,7 @@ async function failure(response: Response): Promise<SourceError> {
 // (GitHub hides what a token cannot write behind 404 as well as 403).
 async function writeFailure(response: Response): Promise<SourceError> {
   const error = await failure(response)
-  if (response.status === 403 && (response.headers.get('x-ratelimit-remaining') === '0' || response.headers.has('retry-after') || /rate limit/i.test(error.message))) {
-    return new SourceError('request-failed', 'GitHub 请求过于频繁，请稍后重试')
-  }
+  if (rateLimited(response, error.message)) return new SourceError('request-failed', 'GitHub 请求过于频繁，请稍后重试')
   if (response.status === 403 && /locked/i.test(error.message)) return new SourceError('request-failed', 'GitHub 上这个事项已锁定，无法写入')
   if (response.status === 403 || response.status === 404) return new SourceError('forbidden', WRITE_FORBIDDEN)
   if (response.status === 422) return new SourceError('request-failed', `GitHub 拒绝了这次写入：${error.message}`)
@@ -343,9 +377,27 @@ export class GitHubClient implements GitHubApi {
 
   async transitions(key: string, signal: AbortSignal): Promise<SourceTransitions> {
     const row = parse(IssueRow, await this.get(issuePath(key), signal))
+    const viewer = await this.viewer(signal)
+    const repository = key.slice(0, key.lastIndexOf('#'))
+    // Facts only: whether the issue is the user's to write to is Antumi's to decide.
+    const facts = { ...(viewer ? { viewer } : {}), ...ownershipFacts(row), type: kindOf(row), scope: { id: repository, name: repository } }
     const statuses = statusMoves(row)
-    if (statuses) return { ...statusOf(row), options: statuses.map(({ id, name, category }) => ({ id, name, category })) }
-    return { ...statusOf(row), options: moves(row).map(({ id, name, action, category }) => ({ id, name, action, category })) }
+    if (statuses) return { ...statusOf(row), options: statuses.map(({ id, name, category }) => ({ id, name, category })), ...facts }
+    return { ...statusOf(row), options: moves(row).map(({ id, name, action, category }) => ({ id, name, action, category })), ...facts }
+  }
+
+  // Left out for a token with no user behind it (an app installation's). Anything else fails the
+  // read, a rate limit too: a rule must not run unguarded because one request stumbled.
+  private async viewer(signal: AbortSignal): Promise<SourceUser | undefined> {
+    try {
+      return person(parse(User, await this.request('GET', '/user', signal, 'application/vnd.github+json', undefined, async (response) => {
+        const error = await failure(response)
+        return rateLimited(response, error.message) ? new SourceError('request-failed', 'GitHub 请求过于频繁，请稍后重试') : error
+      })))
+    } catch (error) {
+      if (error instanceof SourceError && (error.code === 'forbidden' || error.code === 'not-found')) return undefined
+      throw error
+    }
   }
 
   async transition(key: string, id: string, signal: AbortSignal): Promise<SourceStatusResult> {
