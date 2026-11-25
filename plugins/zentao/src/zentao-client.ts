@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { commentState, commentPage, SourceComment, type SourceCommentOptions, type SourceCommentPage } from '@antumi/plugin-sdk'
 import TurndownService from 'turndown'
-import { MAX_ISSUE_TITLE_LENGTH, MAX_SNAPSHOT_LENGTH, SourceError, type SourceIssue, type SourceIssueDetail, type SourceSettings } from '@antumi/plugin-sdk'
+import { MAX_ISSUE_TITLE_LENGTH, MAX_SNAPSHOT_LENGTH, SourceError, type SourceIssue, type SourceIssueDetail, type SourceSettings, type SourceUser } from '@antumi/plugin-sdk'
 
 export type ItemKind = 'task' | 'bug' | 'story'
 const Account = z.union([z.string(), z.object({ account: z.string().optional(), realname: z.string().optional() })]).nullish()
@@ -16,6 +16,11 @@ const Row = z.object({
   // Task fields the status moves need: hours to report, and whether it is a parent task.
   left: Hours, estimate: Hours, consumed: Hours, realStarted: z.string().nullish(),
   isParent: z.union([z.boolean(), z.number(), z.string()]).optional(), parent: z.union([z.number(), z.string()]).nullish(),
+  // Whose the item is and where it sits. Antumi can do without them, so a shape this does not know
+  // reads as not given rather than failing the sync.
+  openedBy: Account.catch(undefined), mode: z.string().nullish().catch(undefined), team: z.unknown().optional(),
+  execution: Id.optional().catch(undefined), executionName: z.string().nullish().catch(undefined),
+  product: Id.optional().catch(undefined), productName: z.string().nullish().catch(undefined),
   actions: z.union([
     z.array(z.object({ id: Id.optional(), comment: z.string().nullish(), actor: Account, date: z.string().nullish() })),
     z.record(z.string(), z.object({ id: Id.optional(), comment: z.string().nullish(), actor: Account, date: z.string().nullish() }))
@@ -28,7 +33,7 @@ const Page = z.object({
 })
 const Profile = z.object({ profile: z.object({ account: z.string().min(1), realname: z.string().optional() }) })
 export const plural: Record<ItemKind, 'tasks' | 'bugs' | 'stories'> = { task: 'tasks', bug: 'bugs', story: 'stories' }
-const titles: Record<ItemKind, string> = { task: '任务', bug: 'Bug', story: '需求' }
+export const titles: Record<ItemKind, string> = { task: '任务', bug: 'Bug', story: '需求' }
 const markdown = new TurndownService({ headingStyle: 'atx', codeBlockStyle: 'fenced' })
 markdown.remove(['script', 'style', 'iframe'])
 
@@ -40,6 +45,21 @@ function parse<T>(schema: z.ZodType<T>, value: unknown): T {
 
 export function account(value: z.infer<typeof Account>): string {
   return typeof value === 'string' ? value : value?.account ?? ''
+}
+
+// The same account everywhere a person is named, so the signed-in user can be matched to an assignee.
+export function person(value: z.infer<typeof Account>): SourceUser | null {
+  const id = account(value)
+  if (!id || id.length > 500) return null
+  const name = typeof value === 'string' ? '' : value?.realname ?? ''
+  return { id, name: (name || id).slice(0, 200) }
+}
+
+// A task sits in an execution, a bug or a story in a product. A list row carries the ID only.
+export function scope(kind: ItemKind, row: ZentaoRow): SourceIssue['scope'] {
+  const id = kind === 'task' ? row.execution : row.product
+  const name = kind === 'task' ? row.executionName : row.productName
+  return id ? { id, name: (name || id).slice(0, 200) } : undefined
 }
 
 function time(value: string | null | undefined): number | null {
@@ -73,11 +93,13 @@ function summary(kind: ItemKind, row: z.infer<typeof Row>, base: string): Source
   const web = new URL(base)
   web.pathname = web.pathname.replace(/api\.php\/v1\/?$/, 'index.php')
   web.search = new URLSearchParams({ m: kind, f: 'view', [`${kind}ID`]: row.id }).toString()
+  const within = scope(kind, row)
   return {
     key: `${kind}-${row.id}`, title: (row.name ?? row.title ?? `${titles[kind]} ${row.id}`).slice(0, MAX_ISSUE_TITLE_LENGTH),
     url: web.href, status: statusName(kind, row.status), statusCategory: category(kind, row.status),
     type: titles[kind], priority: row.pri == null || String(row.pri) === '0' ? null : `P${row.pri}`.slice(0, 100),
-    updatedAt: time(row.lastEditedDate ?? row.editedDate ?? row.openedDate)
+    updatedAt: time(row.lastEditedDate ?? row.editedDate ?? row.openedDate),
+    typeId: kind, ...(within ? { scope: within } : {})
   }
 }
 

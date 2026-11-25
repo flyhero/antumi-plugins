@@ -79,6 +79,20 @@ describe('ZenTao source', () => {
     expect(await client.list('story', { scopeId: '7' }, signal)).toMatchObject([{ key: 'story-12', type: '需求' }])
   })
 
+  it('says each item\'s type and the execution or product it is in, when ZenTao gives it', async () => {
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json({ page: 1, limit: 100, total: 2, tasks: [{ ...row, execution: 42 }, { ...row, id: 13 }] }))
+      .mockResolvedValueOnce(Response.json({ page: 1, limit: 100, total: 1, bugs: [{ ...row, status: 'active', product: 7, execution: 0 }] }))
+      .mockResolvedValueOnce(Response.json({ ...row, status: 'active', product: 7, productName: 'App' }))
+    const client = new ZentaoClient(base, 'token', fetcher)
+    const tasks = await client.list('task', { scopeId: '42', assignee: '', state: 'all' }, signal)
+    expect(tasks.find((issue) => issue.key === 'task-12')).toMatchObject({ type: '任务', typeId: 'task', scope: { id: '42', name: '42' } })
+    expect(tasks.find((issue) => issue.key === 'task-13')).toMatchObject({ typeId: 'task' })
+    expect(tasks.find((issue) => issue.key === 'task-13')).not.toHaveProperty('scope')
+    expect(await client.list('bug', { scopeId: '7', state: 'all' }, signal)).toMatchObject([{ type: 'Bug', typeId: 'bug', scope: { id: '7', name: '7' } }])
+    expect(await client.issue('story', '12', signal)).toMatchObject({ type: '需求', typeId: 'story', scope: { id: '7', name: 'App' } })
+  })
+
   it('converts descriptions, acceptance criteria and available action comments to Markdown', async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(Response.json({
       ...row, spec: '<h2>Requirement</h2><p>Hello</p>', verify: '<ul><li>Works</li></ul>',

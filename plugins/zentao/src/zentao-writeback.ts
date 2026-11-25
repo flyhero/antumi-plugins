@@ -1,5 +1,5 @@
-import { SourceError, type SourceStatusResult, type SourceTransitions } from '@antumi/plugin-sdk'
-import { category, statusName, type ItemKind, type ZentaoClient, type ZentaoRow } from './zentao-client.js'
+import { SourceError, type SourceStatusResult, type SourceTransitions, type SourceUser } from '@antumi/plugin-sdk'
+import { category, person, scope, statusName, titles, type ItemKind, type ZentaoClient, type ZentaoRow } from './zentao-client.js'
 
 // ZenTao moves an item by actions, each allowed from some statuses (the model's isClickable), not by
 // editing its status. Only actions with a RESTful v1 endpoint are offered; cancelling a task has none.
@@ -62,14 +62,42 @@ function available(kind: ItemKind, row: ZentaoRow): Move[] {
   return moves[kind].filter((move) => move.to !== row.status && move.allowed(row.status, isParent(row)))
 }
 
+function multiPerson(row: ZentaoRow): boolean {
+  const team = Array.isArray(row.team) ? row.team.length : row.team && typeof row.team === 'object' ? Object.keys(row.team).length : 0
+  return !!row.mode || team > 0
+}
+
+// Who the item is with, or undefined when ZenTao does not say. A multi-person task has no single
+// assignedTo. A closed item goes to the pseudo account closed, which newer versions answer as
+// null, the same as no one, so the status has to rule it out.
+function assignees(kind: ItemKind, row: ZentaoRow): SourceUser[] | undefined {
+  if (row.assignedTo === undefined || row.status === 'closed' || (kind === 'task' && multiPerson(row))) return undefined
+  if (row.assignedTo === null || row.assignedTo === '') return []
+  const user = person(row.assignedTo)
+  return !user || user.id === 'closed' ? undefined : [user]
+}
+
+// Besides the moves, the facts Antumi tells ownership by; what to make of them is Antumi's.
 export async function transitions(client: ZentaoClient, kind: ItemKind, id: string, signal: AbortSignal): Promise<SourceTransitions> {
-  const row = await client.row(kind, id, signal)
+  const [row, viewer] = await Promise.all([
+    client.row(kind, id, signal),
+    // Moving a status must not depend on reading the account: without it ownership is unknown.
+    client.profile(signal).then(person, (error: unknown) => { if (error instanceof SourceError) return null; throw error })
+  ])
+  const assigned = assignees(kind, row)
+  const within = scope(kind, row)
   return {
     status: statusName(kind, row.status), statusCategory: category(kind, row.status),
     options: available(kind, row).map((move) => {
       const name = statusName(kind, move.to)
-      return { id: move.id, name, ...(move.action === name ? {} : { action: move.action }), category: category(kind, move.to) }
-    })
+      return { id: move.id, name, ...(move.action === name ? {} : { action: move.action }), category: category(kind, move.to), toStatusId: move.to }
+    }),
+    ...(row.status && row.status.length <= 500 ? { statusId: row.status } : {}),
+    ...(viewer ? { viewer } : {}),
+    ...(assigned ? { assignees: assigned } : {}),
+    ...(row.openedBy === undefined ? {} : { reporter: person(row.openedBy) }),
+    type: { id: kind, name: titles[kind] },
+    ...(within ? { scope: within } : {})
   }
 }
 
@@ -77,7 +105,6 @@ export async function transition(client: ZentaoClient, kind: ItemKind, id: strin
   const row = await client.row(kind, id, signal)
   const move = available(kind, row).find((candidate) => candidate.id === option)
   if (!move) throw new SourceError('request-failed', '禅道事项当前不能执行这个操作，请刷新状态后重试')
-  const titles: Record<ItemKind, string> = { task: '任务', bug: 'Bug', story: '需求' }
   const status = await client.act(kind, id, move.path, move.body?.(row, move.action) ?? {}, `${titles[kind]}-${move.action}`, signal)
   return { status: statusName(kind, status), statusCategory: category(kind, status) }
 }
