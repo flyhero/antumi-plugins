@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { SourceTransitionOption } from '@antumi/plugin-sdk'
+import { SourceIssue, SourceTransitionOption } from '@antumi/plugin-sdk'
 import { JiraClient } from './jira-client.js'
 import { jiraProvider } from './jira-provider.js'
 
@@ -66,16 +66,19 @@ describe('Jira writeback', () => {
     const { fetch } = fakeFetch(jira())
     const result = await new JiraClient({ site, email: 'e', token: 't' }, fetch).transitions('PROJ-1', signal)
     expect(result.options.map((option) => SourceTransitionOption.parse(option))).toEqual(result.options)
+    // This Jira names no one and nothing besides the status, so no other fact is made up.
     expect(result).toEqual({
       status: '处理中',
       statusCategory: 'doing',
+      statusId: '3',
       options: [
-        { id: '21', name: 'To Do', action: 'Back to do', category: 'todo' },
-        { id: '31', name: 'Done', category: 'done' },
-        { id: '41', name: 'Done', action: '直接关闭', category: 'done' },
-        { id: '61', name: 'Parked', action: 'Odd', category: 'unknown' }
+        { id: '21', name: 'To Do', action: 'Back to do', category: 'todo', toStatusId: '1' },
+        { id: '31', name: 'Done', category: 'done', toStatusId: '10001' },
+        { id: '41', name: 'Done', action: '直接关闭', category: 'done', toStatusId: '10001' },
+        { id: '61', name: 'Parked', action: 'Odd', category: 'unknown', toStatusId: '9' }
       ]
     })
+    expect(Object.keys(result).sort()).toEqual(['options', 'status', 'statusCategory', 'statusId'])
   })
 
   it('moves the issue by a transition Jira offers, and answers with the status it ends up in', async () => {
@@ -96,6 +99,8 @@ describe('Jira writeback', () => {
     expect(post?.contentType).toBe('application/json')
     expect(post?.redirect).toBe('error')
     expect(calls.at(-1)?.url.pathname).toBe('/rest/api/3/issue/PROJ-1')
+    // A move does not ask who is signed in: that is for the list a rule reads before it.
+    expect(calls.some((call) => call.url.pathname.endsWith('/myself'))).toBe(false)
   })
 
   it('refuses an id Jira does not offer for the issue, without writing', async () => {
@@ -172,5 +177,107 @@ describe('Jira writeback', () => {
     await expect(client.addComment('PROJ-404', { type: 'doc', version: 1, content: [] }, signal)).rejects.toMatchObject({ code: 'not-found' })
     await expect(client.transitions('PROJ-404', signal)).rejects.toMatchObject({ code: 'not-found' })
     await expect(client.transitions('../admin', signal)).rejects.toMatchObject({ code: 'not-found' })
+  })
+})
+
+// PROJ-1 as Jira Cloud has it: who it is with, who reported it, its type and its project.
+const me = { accountId: '5b10a2844c20165700ede21g', displayName: 'Mia Wang', emailAddress: 'me@acme.com' }
+const rita = { accountId: '5b10ac8d82e05b22cc7d4ef5', displayName: 'Rita QA' }
+const bug = { id: '10004', name: 'Bug', subtask: false }
+const project = { id: '10000', key: 'PROJ', name: 'Project X' }
+
+function owned(fields: Record<string, unknown>, myself: () => Response = () => json(me)): Route {
+  return (call) => {
+    const path = call.url.pathname
+    if (path === '/rest/api/3/myself') return myself()
+    if (path === '/rest/api/3/issue/PROJ-1') return json({ key: 'PROJ-1', fields: { status: status('3', '处理中', 'indeterminate'), ...fields } })
+    if (path === '/rest/api/3/issue/PROJ-1/transitions') return json({ transitions: [{ id: '31', name: 'Done', to: status('10001', 'Done', 'done') }] })
+    return undefined
+  }
+}
+
+describe('Jira ownership facts', () => {
+  it('reports who the issue is with, who reported it, its type and its project, from the one read of the issue', async () => {
+    const { fetch, calls } = fakeFetch(owned({ assignee: me, reporter: rita, issuetype: bug, project }))
+    const provider = jiraProvider((credentials) => new JiraClient(credentials, fetch))
+    expect(await provider.transitions!(settings, credential, 'PROJ-1', signal)).toEqual({
+      status: '处理中',
+      statusCategory: 'doing',
+      statusId: '3',
+      options: [{ id: '31', name: 'Done', category: 'done', toStatusId: '10001' }],
+      viewer: { id: me.accountId, name: 'Mia Wang' },
+      assignees: [{ id: me.accountId, name: 'Mia Wang' }],
+      reporter: { id: rita.accountId, name: 'Rita QA' },
+      type: { id: '10004', name: 'Bug' },
+      scope: { id: 'PROJ', name: 'Project X' }
+    })
+    const reads = calls.filter((call) => call.url.pathname === '/rest/api/3/issue/PROJ-1')
+    expect(reads.map((call) => call.url.searchParams.get('fields'))).toEqual(['status,assignee,reporter,issuetype,project'])
+    expect(calls.filter((call) => call.url.pathname === '/rest/api/3/myself')).toHaveLength(1)
+    expect(calls.every((call) => call.method === 'GET')).toBe(true)
+  })
+
+  it('reports an issue handed to someone else as theirs, and one with no assignee as no one\'s', async () => {
+    const handed = fakeFetch(owned({ assignee: rita, reporter: me, issuetype: bug, project }))
+    const theirs = await new JiraClient({ site, email: 'e', token: 't' }, handed.fetch).transitions('PROJ-1', signal)
+    expect(theirs.viewer?.id).toBe(me.accountId)
+    expect(theirs.assignees).toEqual([{ id: rita.accountId, name: 'Rita QA' }])
+
+    const free = fakeFetch(owned({ assignee: null, reporter: null, issuetype: bug, project }))
+    const result = await new JiraClient({ site, email: 'e', token: 't' }, free.fetch).transitions('PROJ-1', signal)
+    expect(result.assignees).toEqual([])
+    expect(result.reporter).toBeNull()
+    expect(result.viewer).toEqual({ id: me.accountId, name: 'Mia Wang' })
+  })
+
+  it('leaves out the viewer and the people when Jira gives no accountId, as a Server install does', async () => {
+    const server = { name: 'mia', key: 'JIRAUSER10000', displayName: 'Mia Wang' }
+    const { fetch } = fakeFetch(owned({ assignee: server, reporter: server, issuetype: bug, project }, () => json(server)))
+    const result = await new JiraClient({ site, email: 'e', token: 't' }, fetch).transitions('PROJ-1', signal)
+    expect(Object.keys(result).sort()).toEqual(['options', 'scope', 'status', 'statusCategory', 'statusId', 'type'])
+    expect(result.type).toEqual({ id: '10004', name: 'Bug' })
+  })
+
+  it('leaves out the viewer when the token may not read its own profile, and fails rather than go unchecked on a passing fault', async () => {
+    const scoped = fakeFetch(owned({ assignee: me }, () => json({ errorMessages: ['forbidden'] }, 403)))
+    const result = await new JiraClient({ site, email: 'e', token: 't' }, scoped.fetch).transitions('PROJ-1', signal)
+    expect('viewer' in result).toBe(false)
+    expect(result.assignees).toEqual([{ id: me.accountId, name: 'Mia Wang' }])
+    expect(result.options.map((option) => option.id)).toEqual(['31'])
+
+    const down = fakeFetch(owned({ assignee: me }, () => json({ errorMessages: ['try later'] }, 503)))
+    await expect(new JiraClient({ site, email: 'e', token: 't' }, down.fetch).transitions('PROJ-1', signal)).rejects.toMatchObject({ code: 'request-failed' })
+  })
+
+  it('keeps the status and the moves when a fact comes in a shape it does not know', async () => {
+    const { fetch } = fakeFetch(owned({ assignee: 'mia', reporter: 7, issuetype: [], project: { key: 'P'.repeat(501), name: 'Long' } }))
+    const result = await new JiraClient({ site, email: 'e', token: 't' }, fetch).transitions('PROJ-1', signal)
+    expect(Object.keys(result).sort()).toEqual(['options', 'status', 'statusCategory', 'statusId', 'viewer'])
+  })
+
+  it('gives each issue of a list and a fetched issue its type id and project', async () => {
+    const row = (key: string, extra: Record<string, unknown> = {}) => ({
+      key,
+      fields: { summary: key, status: status('1', 'To Do', 'new'), priority: null, issuetype: bug, project, updated: null, ...extra }
+    })
+    const { fetch, calls } = fakeFetch((call) => {
+      const path = call.url.pathname
+      // PROJ-3 is as an older Jira or a proxy might send it: no type id, no project.
+      if (path === '/rest/api/3/search/jql') return json({ issues: [row('PROJ-2'), row('PROJ-3', { issuetype: { name: 'Task' }, project: undefined })], isLast: true })
+      if (path === '/rest/api/3/issue/PROJ-2') return json(row('PROJ-2', { description: null, attachment: [] }))
+      if (path === '/rest/api/3/issue/PROJ-2/comment') return json({ comments: [], total: 0 })
+      return undefined
+    })
+    const provider = jiraProvider((credentials) => new JiraClient(credentials, fetch))
+    const [listed, bare] = await provider.list(settings, credential, signal)
+    expect(listed).toMatchObject({ key: 'PROJ-2', type: 'Bug', typeId: '10004', scope: { id: 'PROJ', name: 'Project X' } })
+    expect(SourceIssue.parse(listed)).toEqual(listed)
+    expect(bare).toMatchObject({ key: 'PROJ-3', type: 'Task' })
+    expect(bare && ('typeId' in bare || 'scope' in bare)).toBe(false)
+    const fetched = await provider.fetch(settings, credential, 'PROJ-2', signal, { images: false })
+    expect(fetched).toMatchObject({ key: 'PROJ-2', type: 'Bug', typeId: '10004', scope: { id: 'PROJ', name: 'Project X' } })
+    for (const call of calls.filter((entry) => !entry.url.pathname.endsWith('/comment'))) {
+      expect(call.url.searchParams.get('fields')?.split(',')).toEqual(expect.arrayContaining(['issuetype', 'project']))
+    }
   })
 })

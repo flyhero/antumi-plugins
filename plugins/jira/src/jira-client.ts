@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { commentState, commentPage, SourceComment, type SourceCommentState, type SourceCommentOptions, type SourceCommentPage } from '@antumi/plugin-sdk'
 import { adfToMarkdown, escapeLinkText } from './jira-adf.js'
 import { isImageAttachment } from './jira-snapshot.js'
-import { ISSUE_STATUS_CATEGORIES, MAX_TASK_IMAGES, type SourceCommentResult, type SourceIssue, type SourceStatusResult, type SourceTransitions } from '@antumi/plugin-sdk'
+import { ISSUE_STATUS_CATEGORIES, MAX_TASK_IMAGES, type SourceCommentResult, type SourceIssue, type SourceStatusResult, type SourceTransitions, type SourceUser } from '@antumi/plugin-sdk'
 import type { AdfDocument } from './markdown-adf.js'
 import { SourceError } from '@antumi/plugin-sdk'
 
@@ -26,8 +26,8 @@ export type JiraApi = {
   issue(key: string, signal: AbortSignal): Promise<JiraIssue>
   // An attachment's bytes, at most `limit` of them; what they are is for the caller to check.
   download(attachmentId: string, limit: number, signal: AbortSignal): Promise<Uint8Array>
-  // Writing back: the issue's status and the transitions open to it now, a move by transition id,
-  // and a comment.
+  // Writing back: the issue's status and the transitions open to it now, with whose it is and what
+  // it is, a move by transition id, and a comment.
   transitions?(key: string, signal: AbortSignal): Promise<SourceTransitions>
   transition?(key: string, id: string, signal: AbortSignal): Promise<SourceStatusResult>
   addComment?(key: string, body: AdfDocument, signal: AbortSignal): Promise<SourceCommentResult>
@@ -44,8 +44,10 @@ const MAX_ERROR_BYTES = 64 * 1024
 const SEARCH_LIMIT = 200
 const PAGE_SIZE = 100
 const COMMENT_LIMIT = 20
-const SUMMARY_FIELDS = 'summary,status,priority,issuetype,updated'
+const SUMMARY_FIELDS = 'summary,status,priority,issuetype,project,updated'
 const ISSUE_FIELDS = `${SUMMARY_FIELDS},description,attachment`
+// The status a move starts from, and in the same reply whose the issue is and what it is.
+const FACT_FIELDS = 'status,assignee,reporter,issuetype,project'
 
 // Origin only; plain http is refused except on loopback, since the token rides in every request.
 export function normalizeSite(input: string): string {
@@ -64,11 +66,14 @@ export function normalizeSite(input: string): string {
 }
 
 const Named = z.object({ name: z.string() })
+const Id = z.union([z.string(), z.number()]).transform(String)
 const SummaryFields = z.object({
   summary: z.string().nullish(),
   status: Named.extend({ statusCategory: z.object({ key: z.string() }).nullish() }).nullish(),
   priority: Named.nullish(),
-  issuetype: Named.nullish(),
+  // The type's id and the project are for writeback lanes only: an odd one must not cost the inbox.
+  issuetype: Named.extend({ id: Id.nullish().catch(undefined) }).nullish(),
+  project: z.object({ key: z.string(), name: z.string().catch('') }).nullish().catch(undefined),
   updated: z.string().nullish()
 })
 const IssueRow = z.object({ key: z.string(), fields: SummaryFields })
@@ -108,7 +113,20 @@ const CommentPage = z.object({
 const TenantInfo = z.object({ cloudId: z.string() })
 const ErrorBody = z.object({ errorMessages: z.array(z.string()).optional() })
 const StatusRow = Named.extend({ id: z.union([z.string(), z.number()]).transform(String).nullish(), statusCategory: z.object({ key: z.string() }).nullish() })
-const IssueStatus = z.object({ key: z.string(), fields: z.object({ status: StatusRow.nullish() }) })
+// accountId is Jira Cloud's; a Server install has none.
+const Viewer = z.object({ accountId: z.string().nullish().catch(undefined), displayName: z.string().nullish().catch(undefined) })
+// null is Jira saying there is no one; a field left out, or of a shape not known, says nothing.
+const Person = z.object({ accountId: z.string().nullish(), displayName: z.string().nullish() }).nullish().catch(undefined)
+const IssueFacts = z.object({
+  key: z.string(),
+  fields: z.object({
+    status: StatusRow.nullish(),
+    assignee: Person,
+    reporter: Person,
+    issuetype: z.object({ id: Id.nullish(), name: z.string().nullish() }).nullish().catch(undefined),
+    project: z.object({ key: z.string().nullish(), name: z.string().nullish() }).nullish().catch(undefined)
+  })
+})
 const TransitionList = z.object({
   transitions: z.array(
     z.object({
@@ -196,6 +214,16 @@ function statusOf(status: z.infer<typeof StatusRow> | null | undefined): SourceS
   return { status: (status?.name ?? '').slice(0, 100), statusCategory: CATEGORY[status?.statusCategory?.key ?? ''] ?? 'unknown' }
 }
 
+// Jira's id for something, whole or not at all: one cut short would name something else.
+function whole(id: string | null | undefined): string | undefined {
+  return id && id.length <= 500 ? id : undefined
+}
+
+function named(id: string | null | undefined, name: string | null | undefined): SourceUser | undefined {
+  const kept = whole(id)
+  return kept ? { id: kept, name: (name ?? '').slice(0, 200) } : undefined
+}
+
 // Jira's own words go along, shortened: they say which permission or field it wanted.
 function brief(parts: readonly string[]): string {
   const text = parts.map((part) => part.trim()).filter(Boolean).join('；').replace(/\s+/g, ' ')
@@ -207,6 +235,8 @@ function summarize(site: string, row: z.infer<typeof IssueRow>): SourceIssue | n
     return null
   }
   const { fields } = row
+  const typeId = whole(fields.issuetype?.id)
+  const scope = named(fields.project?.key, fields.project?.name)
   return {
     key: row.key,
     title: fields.summary ?? '',
@@ -215,7 +245,9 @@ function summarize(site: string, row: z.infer<typeof IssueRow>): SourceIssue | n
     statusCategory: CATEGORY[fields.status?.statusCategory?.key ?? ''] ?? 'unknown',
     type: fields.issuetype?.name ?? '',
     priority: fields.priority?.name ?? null,
-    updatedAt: time(fields.updated)
+    updatedAt: time(fields.updated),
+    ...(typeId ? { typeId } : {}),
+    ...(scope ? { scope } : {})
   }
 }
 
@@ -378,29 +410,34 @@ export class JiraClient implements JiraApi {
     return commentPage(comments, options)
   }
 
-  // The transitions open to the issue now, as Jira lists them for this user; one leading back to the
-  // current status (a self loop) is not a move, nor one whose screen asks for a field with no
-  // default (a resolution, say), which Antumi cannot fill and Jira would refuse.
+  // The issue's status and the moves open to it, with the facts Antumi tells whose it is by: the
+  // account these calls run as, who it is assigned to and reported by, its type and its project.
+  // Facts only, and only those Jira gave: one it did not is left out, never guessed.
   async transitions(key: string, signal: AbortSignal): Promise<SourceTransitions> {
-    const current = await this.status(key, signal)
-    const path = `/rest/api/3/issue/${encodeURIComponent(key)}/transitions?expand=transitions.fields`
-    const { transitions } = parse(TransitionList, await this.get(path, signal))
-    const options = transitions.flatMap((transition) => {
-      const to = transition.to
-      const name = (to?.name ?? '').trim().slice(0, 100)
-      const id = transition.id.slice(0, 500)
-      const here = to?.id && current.id ? to.id === current.id : name === current.status
-      const asks = Object.values(transition.fields ?? {}).some((field) => field.required && !field.hasDefaultValue)
-      if (transition.isAvailable === false || !id || !name || here || asks) return []
-      const action = transition.name.trim().slice(0, 100)
-      return [{ id, name, ...(action && action.toLowerCase() !== name.toLowerCase() ? { action } : {}), category: statusOf(to).statusCategory }]
-    })
-    return { status: current.status, statusCategory: current.statusCategory, options: options.slice(0, MAX_OPTIONS) }
+    const fields = await this.facts(key, signal)
+    const [options, viewer] = await Promise.all([this.options(key, fields.status, signal), this.viewer(signal)])
+    const statusId = whole(fields.status?.id)
+    // People go by accountId, as the viewer does; a Server user has none, which says nothing.
+    const assignee = named(fields.assignee?.accountId, fields.assignee?.displayName)
+    const assignees = fields.assignee === null ? [] : assignee ? [assignee] : undefined
+    const reporter = fields.reporter === null ? null : named(fields.reporter?.accountId, fields.reporter?.displayName)
+    const type = named(fields.issuetype?.id, fields.issuetype?.name)
+    const scope = named(fields.project?.key, fields.project?.name)
+    return {
+      ...statusOf(fields.status),
+      options,
+      ...(statusId ? { statusId } : {}),
+      ...(viewer ? { viewer } : {}),
+      ...(assignees ? { assignees } : {}),
+      ...(reporter !== undefined ? { reporter } : {}),
+      ...(type ? { type } : {}),
+      ...(scope ? { scope } : {})
+    }
   }
 
   // Only a transition Jira offers right now: an id from an older list would fail with a vaguer 400.
   async transition(key: string, id: string, signal: AbortSignal): Promise<SourceStatusResult> {
-    const { options } = await this.transitions(key, signal)
+    const options = await this.options(key, (await this.facts(key, signal)).status, signal)
     const option = options.find((candidate) => candidate.id === id)
     if (!option) {
       throw new SourceError('request-failed', `${key} 现在不能这样流转，状态可能已在 Jira 里被改过，请刷新后重选。`)
@@ -409,8 +446,41 @@ export class JiraClient implements JiraApi {
     const response = await this.send(path, signal, 'application/json', { method: 'POST', body: { transition: { id } } }, (failed) => writeFailure(failed, 'transition', key))
     await response.body?.cancel()
     // Post functions may move it on again; what Jira holds afterwards is the answer.
-    const { status, statusCategory } = await this.status(key, signal)
-    return { status, statusCategory }
+    return statusOf((await this.facts(key, signal)).status)
+  }
+
+  // The transitions open to the issue now, as Jira lists them for this user; one leading back to the
+  // current status (a self loop) is not a move, nor one whose screen asks for a field with no
+  // default (a resolution, say), which Antumi cannot fill and Jira would refuse.
+  private async options(key: string, status: z.infer<typeof StatusRow> | null | undefined, signal: AbortSignal): Promise<SourceTransitions['options']> {
+    const current = statusOf(status).status
+    const path = `/rest/api/3/issue/${encodeURIComponent(key)}/transitions?expand=transitions.fields`
+    const { transitions } = parse(TransitionList, await this.get(path, signal))
+    const options = transitions.flatMap((transition) => {
+      const to = transition.to
+      const name = (to?.name ?? '').trim().slice(0, 100)
+      const id = transition.id.slice(0, 500)
+      const here = to?.id && status?.id ? to.id === status.id : name === current
+      const asks = Object.values(transition.fields ?? {}).some((field) => field.required && !field.hasDefaultValue)
+      if (transition.isAvailable === false || !id || !name || here || asks) return []
+      const action = transition.name.trim().slice(0, 100)
+      const toStatusId = whole(to?.id)
+      return [{ id, name, ...(action && action.toLowerCase() !== name.toLowerCase() ? { action } : {}), category: statusOf(to).statusCategory, ...(toStatusId ? { toStatusId } : {}) }]
+    })
+    return options.slice(0, MAX_OPTIONS)
+  }
+
+  // Who these calls run as. A token that reads the issue but not its own profile leaves it out, as
+  // a Server with no accountId does; any other failure stops the call, so that a passing fault is
+  // not taken for an account Jira cannot name.
+  private async viewer(signal: AbortSignal): Promise<SourceUser | undefined> {
+    try {
+      const reply = Viewer.safeParse(await this.get('/rest/api/3/myself', signal))
+      return reply.success ? named(reply.data.accountId, reply.data.displayName) : undefined
+    } catch (error) {
+      if (error instanceof SourceError && (error.code === 'forbidden' || error.code === 'auth-failed' || error.code === 'not-found')) return undefined
+      throw error
+    }
   }
 
   async addComment(key: string, body: AdfDocument, signal: AbortSignal): Promise<SourceCommentResult> {
@@ -422,11 +492,11 @@ export class JiraClient implements JiraApi {
     return { id, url: `${this.credentials.site}/browse/${encodeURIComponent(key)}?focusedCommentId=${encodeURIComponent(id)}` }
   }
 
-  private async status(key: string, signal: AbortSignal): Promise<SourceStatusResult & { id: string | null }> {
+  // One read for the status and for whose the issue is, so the two are of the same moment.
+  private async facts(key: string, signal: AbortSignal): Promise<z.infer<typeof IssueFacts>['fields']> {
     if (!JIRA_KEY_PATTERN.test(key)) throw new SourceError('not-found', `${key} 不是 Jira 事项编号`)
-    const query = new URLSearchParams({ fields: 'status' })
-    const row = parse(IssueStatus, await this.get(`/rest/api/3/issue/${encodeURIComponent(key)}?${query}`, signal))
-    return { ...statusOf(row.fields.status), id: row.fields.status?.id ?? null }
+    const query = new URLSearchParams({ fields: FACT_FIELDS })
+    return parse(IssueFacts, await this.get(`/rest/api/3/issue/${encodeURIComponent(key)}?${query}`, signal)).fields
   }
 
   // Straight from the site, never through a redirect: the token must not follow one elsewhere.

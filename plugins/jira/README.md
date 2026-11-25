@@ -13,6 +13,8 @@
 
 「设置 → 集成 → Jira → 回写」预设了 In Progress（进行中）和 Done（完成），也可以自己填状态名或转换名，多个用 `|` 隔开。
 
+按规则回写时，Antumi 只改分配给你的事项：事项交给别人（如测试）之后就不再动它，在任务详情里手动改状态、发评论不受影响（需要更新后的 Antumi）。归属按 Jira Cloud 的 accountId 判断；Jira Server / Data Center 没有 accountId，无法校验，规则照旧执行。
+
 写入需要 token 有写权限：普通 API token 跟随账号权限，需要在项目里有 Transition Issues 和 Add Comments 权限；带权限范围的 token 还要勾选 `write:jira-work`。只读 token 照常同步，写入时报「没有权限」，换一个有写权限的 token 重新登录即可。
 
 转换配置了必填字段（例如解决结果）且没有默认值时，Antumi 不列出它，规则也不会选它，需要到 Jira 里操作。Jira 不支持按请求去重，结果不明的评论不会自动重发。
