@@ -115,7 +115,9 @@ const TransitionList = z.object({
       id: z.union([z.string(), z.number()]).transform(String),
       name: z.string().catch(''),
       isAvailable: z.boolean().nullish(),
-      to: StatusRow.nullish()
+      to: StatusRow.nullish(),
+      // With expand=transitions.fields: the transition screen's fields, by field id.
+      fields: z.record(z.string(), z.object({ required: z.boolean().catch(false), hasDefaultValue: z.boolean().catch(false) }).catch({ required: false, hasDefaultValue: false })).nullish()
     })
   )
 })
@@ -377,17 +379,19 @@ export class JiraClient implements JiraApi {
   }
 
   // The transitions open to the issue now, as Jira lists them for this user; one leading back to the
-  // current status (a self loop) is not a move.
+  // current status (a self loop) is not a move, nor one whose screen asks for a field with no
+  // default (a resolution, say), which Antumi cannot fill and Jira would refuse.
   async transitions(key: string, signal: AbortSignal): Promise<SourceTransitions> {
     const current = await this.status(key, signal)
-    const path = `/rest/api/3/issue/${encodeURIComponent(key)}/transitions`
+    const path = `/rest/api/3/issue/${encodeURIComponent(key)}/transitions?expand=transitions.fields`
     const { transitions } = parse(TransitionList, await this.get(path, signal))
     const options = transitions.flatMap((transition) => {
       const to = transition.to
       const name = (to?.name ?? '').trim().slice(0, 100)
       const id = transition.id.slice(0, 500)
       const here = to?.id && current.id ? to.id === current.id : name === current.status
-      if (transition.isAvailable === false || !id || !name || here) return []
+      const asks = Object.values(transition.fields ?? {}).some((field) => field.required && !field.hasDefaultValue)
+      if (transition.isAvailable === false || !id || !name || here || asks) return []
       const action = transition.name.trim().slice(0, 100)
       return [{ id, name, ...(action && action.toLowerCase() !== name.toLowerCase() ? { action } : {}), category: statusOf(to).statusCategory }]
     })

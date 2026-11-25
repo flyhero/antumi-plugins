@@ -47,6 +47,20 @@ function jira(write: (call: Call) => Response | undefined = () => undefined): Ro
 }
 
 describe('Jira writeback', () => {
+  it('leaves out a transition whose screen asks for a field with no default, and asks Jira for the fields', async () => {
+    current = status('3', '处理中', 'indeterminate')
+    const { fetch, calls } = fakeFetch((call) => {
+      if (call.url.pathname === '/rest/api/3/issue/PROJ-1') return json({ key: 'PROJ-1', fields: { status: current } })
+      return json({ transitions: [
+        { id: '71', name: 'Resolve', to: status('10003', 'Resolved', 'done'), fields: { resolution: { required: true, hasDefaultValue: false } } },
+        { id: '81', name: 'Verify', to: status('10004', 'Verified', 'done'), fields: { customfield_1: { required: true, hasDefaultValue: true }, comment: { required: false, hasDefaultValue: false } } }
+      ] })
+    })
+    const result = await new JiraClient({ site, email: 'e', token: 't' }, fetch).transitions('PROJ-1', signal)
+    expect(result.options.map((option) => option.id)).toEqual(['81'])
+    expect(calls.some((call) => call.url.pathname.endsWith('/transitions') && call.url.searchParams.get('expand') === 'transitions.fields')).toBe(true)
+  })
+
   it('lists the moves open now with their categories, leaving out the current status', async () => {
     current = status('3', '处理中', 'indeterminate')
     const { fetch } = fakeFetch(jira())
