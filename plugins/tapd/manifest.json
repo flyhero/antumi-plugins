@@ -1,6 +1,6 @@
 {
   "id": "antumi.tapd",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "engines": {
     "antumi": ">=0.15.11 <1.0.0"
   },
@@ -11,6 +11,11 @@
         "commentSync": 1,
         "writeback": 1,
         "writebackRules": {"start": {"presets": [{"value": "进行中|开发中", "label": "任务进行中、需求开发中", "translations": {"en": {"label": "Task in progress, story in development"}}}], "placeholder": "如：开发中 | 进行中", "hint": "需求和缺陷按项目工作流的状态名填；任务只有未开始、进行中、已完成。", "translations": {"en": {"placeholder": "e.g. 开发中 | 进行中", "hint": "Stories and bugs take the status names of the project's workflow; tasks have only 未开始, 进行中 and 已完成."}}}, "review": {"presets": [{"value": "已完成|已实现|已解决", "label": "任务已完成、需求已实现、缺陷已解决", "translations": {"en": {"label": "Task done, story implemented, bug resolved"}}}], "placeholder": "如：已实现 | 已解决", "translations": {"en": {"placeholder": "e.g. 已实现 | 已解决"}}}, "done": {"presets": [{"value": "已完成|已实现|已解决", "label": "任务已完成、需求已实现、缺陷已解决", "translations": {"en": {"label": "Task done, story implemented, bug resolved"}}}], "placeholder": "如：已关闭", "translations": {"en": {"placeholder": "e.g. 已关闭"}}}},
+        "writebackTypes": [
+          {"id": "story", "label": "需求", "translations": {"en": {"label": "Story"}}, "rules": {"start": {"presets": [{"value": "开发中", "label": "开发中", "translations": {"en": {"label": "In development"}}}], "custom": true, "placeholder": "如：开发中", "hint": "按项目工作流里显示的状态名填。", "translations": {"en": {"placeholder": "e.g. 开发中", "hint": "Use the status name as the project's workflow shows it."}}}, "review": {"presets": [{"value": "已实现", "label": "已实现", "translations": {"en": {"label": "Implemented"}}}], "custom": true, "placeholder": "如：已实现", "hint": "填团队里开发交给测试的那个状态。", "translations": {"en": {"placeholder": "e.g. 已实现", "hint": "The status your team hands a story to testing in."}}}, "done": {"custom": true, "placeholder": "如：已关闭", "hint": "团队里由开发自己完成或关闭需求时才填。", "translations": {"en": {"placeholder": "e.g. 已关闭", "hint": "Fill this in only if developers finish or close stories themselves in your team."}}}}},
+          {"id": "bug", "label": "缺陷", "translations": {"en": {"label": "Bug"}}, "rules": {"start": {"presets": [{"value": "接受/处理|处理中", "label": "接受/处理", "translations": {"en": {"label": "Accepted / in progress"}}}], "custom": true, "placeholder": "如：接受/处理", "hint": "按项目工作流里显示的状态名填。", "translations": {"en": {"placeholder": "e.g. 接受/处理", "hint": "Use the status name as the project's workflow shows it."}}}, "review": {"presets": [{"value": "已解决", "label": "已解决", "translations": {"en": {"label": "Resolved"}}}], "custom": true, "placeholder": "如：已解决", "translations": {"en": {"placeholder": "e.g. 已解决"}}}, "done": {"custom": true, "placeholder": "如：已关闭", "hint": "验证和关闭通常由测试完成，一般不用填。", "translations": {"en": {"placeholder": "e.g. 已关闭", "hint": "Verifying and closing a bug is usually the tester's job, so this is normally left empty."}}}}},
+          {"id": "task", "label": "任务", "translations": {"en": {"label": "Task"}}, "rules": {"start": {"presets": [{"value": "进行中", "label": "进行中", "translations": {"en": {"label": "In progress"}}}], "custom": false}, "review": {"presets": [{"value": "已完成", "label": "已完成", "translations": {"en": {"label": "Done"}}}], "custom": false}, "done": {"presets": [{"value": "已完成", "label": "已完成", "translations": {"en": {"label": "Done"}}}], "custom": false}}}
+        ],
         "name": "TAPD",
         "settings": [
           {

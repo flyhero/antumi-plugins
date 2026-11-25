@@ -191,3 +191,24 @@
   3. 打 `tapd-v0.1.0` 标签发布
   4. 主仓库加推荐条目、CHANGELOG 和 PLUGINS.md
   5. 第二期：附件图片（`image`）；回写评论和流转状态要先扩 SDK
+
+## 11. 归属事实（0.4.0）
+
+Antumi 按规则回写前要知道事项是不是归当前用户（主仓库 `docs/SOURCE-AUTOMATION.md`）。插件只报告 TAPD 上的事实，不做判断；SDK 0.7.0 没有新方法，事实随 `transitions()` 返回：
+
+| 事实 | 取值 |
+|---|---|
+| `statusId` | 事项的 `status`（工作流 key）；选项的 `toStatusId` 是目标状态的 key，和选项 `id` 相同 |
+| `viewer` | `/users/info` 的 `nick` 作 `id`，`name` 作显示名（没有时用 `nick`） |
+| `assignees` | 需求和任务的 `owner`、缺陷的 `current_owner`，按 `;` 拆开、去掉空白和重复，每人 `{ id: nick, name: nick }`；字段为空是 `[]` |
+| `reporter` | 缺陷的 `reporter`，需求和任务的 `creator`；为空是 `null` |
+| `type` | `story` / `bug` / `task`，名字是需求 / 缺陷 / 任务（不带项目名） |
+| `scope` | 项目 ID 和项目名；项目名取不到时用 ID |
+
+- TAPD 的人员字段只有昵称，所以 `viewer.id` 和 `assignees[].id` 都是去掉首尾空白的昵称，和 `@me` 过滤用的是同一种拆法。
+- 取不到就不返回：响应里没有处理人字段时不报告 `assignees`（空字符串或 `null` 才是没人处理）；超出协议上限（50 人、500 字符）的名单整个不报告，免得少报成「只有我」。
+- `/users/info` 失败时整个 `transitions()` 失败，不退成「归属未知」：流转和评论本来就要用它取昵称，而归属未知时规则会照旧执行。
+- 多一次 `/users/info`、一次 `get_workspace_info`，一次 `transitions()` 共 6 个请求（任务 4 个）。
+- `list` / `fetch` 的事项带 `typeId` 和 `scope`；`type` 仍是给人看的标签（多项目时带项目名）。
+- manifest 的 `writebackTypes` 列出三种事项各自的预设：任务是固定的三个状态；需求是默认工作流的「开发中」「已实现」；缺陷是默认工作流的「接受/处理」「已解决」，「由我关闭」不给预设（验证和关闭是测试的事）。顶层的 `writebackRules` 留给旧版 Antumi。
+- 待真实账号确认：按 `id` 查单条时处理人字段总会返回；`nick` 和处理人字段里的昵称写法一致；缺陷默认工作流里 `in_progress` 的名字是「接受/处理」。

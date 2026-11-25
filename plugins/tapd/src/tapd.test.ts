@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
-import { SourceError } from '@antumi/plugin-sdk'
+import { PluginManifest, SourceError } from '@antumi/plugin-sdk'
+import manifest from '../manifest.json' with { type: 'json' }
 import { people, TapdClient, time } from './tapd-client.js'
 import { tapdSource } from './tapd-source.js'
 import { idWorkspace, itemRef, itemUrl, parseWorkspace, parseWorkspaces, workspaceCandidates } from './tapd-url.js'
@@ -127,7 +128,8 @@ describe('TAPD client', () => {
     const issues = await client.list({ workspace: ws, kind: 'story', assignee: '@me', state: 'active' }, signal)
     expect(issues).toEqual([
       { key: 'story-1120003271001000004', title: 'Story 1120003271001000004', url: `https://www.tapd.cn/${ws}/prong/stories/view/1120003271001000004`,
-        status: 'status_9', statusCategory: 'unknown', type: '需求', priority: null, updatedAt: Date.parse('2026-11-21T00:00:00Z') },
+        status: 'status_9', statusCategory: 'unknown', type: '需求', priority: null, updatedAt: Date.parse('2026-11-21T00:00:00Z'),
+        typeId: 'story', scope: { id: ws, name: '商城' } },
       expect.objectContaining({ key: 'story-1120003271001000001', status: '实现中', statusCategory: 'doing', priority: '高' })
     ])
     const list = calls.find((call) => call.path === '/stories')
@@ -178,6 +180,7 @@ describe('TAPD client', () => {
       ['story-1164208216001042393', '需求 · 招聘系统', `https://www.tapd.cn/${other}/prong/stories/view/1164208216001042393`],
       [`story-${storyId}`, '需求 · 商城', `https://www.tapd.cn/${ws}/prong/stories/view/${storyId}`]
     ])
+    expect(issues.map((issue) => [issue.typeId, issue.scope])).toEqual([['story', { id: other, name: '招聘系统' }], ['story', { id: ws, name: '商城' }]])
     expect(calls.filter((call) => call.path === '/users/info')).toHaveLength(1)
   })
 
@@ -196,7 +199,7 @@ describe('TAPD client', () => {
     const source = tapdSource(() => client)
     const credential = { kind: 'token', payload: { token } }
     const issue = await source.fetch({ workspace: `${ws},64208216` }, credential, 'story-1164208216001042393', signal)
-    expect(issue.type).toBe('需求 · 商城')
+    expect(issue).toMatchObject({ type: '需求 · 商城', typeId: 'story', scope: { id: '64208216', name: '商城' } })
     expect(asked).toEqual(['64208216'])
     asked.length = 0
     // A 0.1.0 setting names one project; an item pasted from another is still found through its ID.
@@ -236,6 +239,7 @@ describe('TAPD client', () => {
       '/comments': () => Response.json({ status: 0, info: 'no permission', data: null })
     })
     const issue = await client.issue([ws], 'bug', '11', signal)
+    expect(issue).toMatchObject({ type: '缺陷', typeId: 'bug', scope: { id: ws, name: '商城' } })
     expect(issue.markdown).toContain('创建人：carl')
     expect(issue.markdown).toContain('附件未能获取')
     expect(issue.markdown).toContain('评论未能获取')
@@ -315,12 +319,16 @@ describe('TAPD writeback', () => {
     const { calls, client } = server({ ...workflow, '/stories': () => ok([story(storyId, { status: 'planning', workitem_type_id: '1120003271000000001' })]) })
     const result = await tapdSource(() => client).transitions?.({ workspace: ws }, { kind: 'token', payload: { token } }, `story-${storyId}`, signal)
     expect(result).toEqual({
-      status: '规划中', statusCategory: 'todo',
+      status: '规划中', statusCategory: 'todo', statusId: 'planning',
       options: [
-        { id: 'developing', name: '实现中', category: 'doing' },
-        { id: 'status_3', name: '已上线', category: 'done' },
-        { id: 'status_7', name: 'status_7', category: 'unknown' }
-      ]
+        { id: 'developing', name: '实现中', category: 'doing', toStatusId: 'developing' },
+        { id: 'status_3', name: '已上线', category: 'done', toStatusId: 'status_3' },
+        { id: 'status_7', name: 'status_7', category: 'unknown', toStatusId: 'status_7' }
+      ],
+      viewer: { id: 'ann', name: '安' },
+      assignees: [{ id: 'ann', name: 'ann' }, { id: 'bob', name: 'bob' }],
+      reporter: { id: 'carl', name: 'carl' },
+      type: { id: 'story', name: '需求' }, scope: { id: ws, name: '商城' }
     })
     // The story's category picks its workflow.
     for (const path of ['/workflows/all_transitions', '/workflows/status_map']) {
@@ -330,11 +338,68 @@ describe('TAPD writeback', () => {
 
   it('offers the other fixed statuses for a task', async () => {
     const { calls, client } = server({ ...routes, '/tasks': () => ok([{ Task: { id: '42', name: 'T', status: 'progressing' } }]) })
+    // The row names no owner and no creator, so neither is reported: not known is not no one.
     expect(await client.transitions(ws, 'task', '42', signal)).toEqual({
-      status: '进行中', statusCategory: 'doing',
-      options: [{ id: 'open', name: '未开始', category: 'todo' }, { id: 'done', name: '已完成', category: 'done' }]
+      status: '进行中', statusCategory: 'doing', statusId: 'progressing',
+      options: [{ id: 'open', name: '未开始', category: 'todo', toStatusId: 'open' }, { id: 'done', name: '已完成', category: 'done', toStatusId: 'done' }],
+      viewer: { id: 'ann', name: '安' }, type: { id: 'task', name: '任务' }, scope: { id: ws, name: '商城' }
     })
     expect(calls.some((call) => call.path.startsWith('/workflows'))).toBe(false)
+  })
+
+  it('reports who a bug is with: both current handlers, its reporter, its kind and its project', async () => {
+    const bugs = { ...routes, '/workflows/all_transitions': () => ok([{ Name: 'new-resolved', StepPrevious: 'new', StepNext: 'resolved' }]), '/workflows/status_map': () => ok({ new: '新', resolved: '已解决' }) }
+    const { client } = server({ ...bugs, '/bugs': () => ok([{ Bug: { id: '11', title: 'Crash', status: 'new', current_owner: 'ann;bob;', reporter: 'tina', creator: 'ignored', owner: 'ignored' } }]) })
+    const result = await tapdSource(() => client).transitions?.({ workspace: ws }, { kind: 'token', payload: { token } }, 'bug-11', signal)
+    expect(result).toMatchObject({
+      statusId: 'new', options: [{ id: 'resolved', name: '已解决', toStatusId: 'resolved' }],
+      viewer: { id: 'ann', name: '安' },
+      assignees: [{ id: 'ann', name: 'ann' }, { id: 'bob', name: 'bob' }],
+      reporter: { id: 'tina', name: 'tina' },
+      type: { id: 'bug', name: '缺陷' }, scope: { id: ws, name: '商城' }
+    })
+    // Handed to the tester: the same kind of id as the viewer's, so it is plainly not ann's.
+    const handed = server({ ...bugs, '/bugs': () => ok([{ Bug: { id: '11', title: 'Crash', status: 'resolved', current_owner: 'tina', reporter: 'tina' } }]) })
+    expect((await handed.client.transitions(ws, 'bug', '11', signal)).assignees).toEqual([{ id: 'tina', name: 'tina' }])
+  })
+
+  it('reports an item no one handles as having no assignees, and people by trimmed nick', async () => {
+    for (const owner of ['', null, ' ; ']) {
+      const { client } = server({ ...routes, '/tasks': () => ok([{ Task: { id: '42', name: 'T', status: 'open', owner, creator: '' } }]) })
+      expect(await client.transitions(ws, 'task', '42', signal), String(owner)).toMatchObject({ assignees: [], reporter: null, type: { id: 'task', name: '任务' } })
+    }
+    const { client } = server({
+      ...workflow,
+      '/users/info': () => ok({ nick: ' ann ', name: '' }),
+      // The project's name is for show: without it the id stands in.
+      '/workspaces/get_workspace_info': () => new Response(null, { status: 403 }),
+      '/stories': () => ok([story(storyId, { owner: ' ann ;ann;', creator: ' carl ' })])
+    })
+    expect(await client.transitions(ws, 'story', storyId, signal)).toMatchObject({
+      viewer: { id: 'ann', name: 'ann' }, assignees: [{ id: 'ann', name: 'ann' }], reporter: { id: 'carl', name: 'carl' }, scope: { id: ws, name: ws }
+    })
+  })
+
+  it('fails rather than report an item without saying whose account it is', async () => {
+    const { client } = server({ ...workflow, '/users/info': () => new Response(null, { status: 502 }), '/stories': () => ok([story(storyId)]) })
+    await expect(client.transitions(ws, 'story', storyId, signal)).rejects.toMatchObject({ code: 'request-failed' })
+  })
+
+  it('declares its three kinds of item, each with the statuses its stages take', () => {
+    const [source] = PluginManifest.parse(manifest).contributes.sources
+    expect(source?.writebackTypes?.map((type) => [type.id, type.label, type.translations?.en?.label, type.mode])).toEqual([
+      ['story', '需求', 'Story', 'on'], ['bug', '缺陷', 'Bug', 'on'], ['task', '任务', 'Task', 'on']
+    ])
+    const stages = (id: string) => {
+      const rules = source?.writebackTypes?.find((type) => type.id === id)?.rules
+      return [rules?.start, rules?.review, rules?.done].map((stage) => stage ? { values: stage.presets.map((preset) => preset.value), custom: stage.custom } : stage)
+    }
+    expect(stages('story')).toEqual([{ values: ['开发中'], custom: true }, { values: ['已实现'], custom: true }, { values: [], custom: true }])
+    // Verifying and closing a bug is the tester's, so nothing is offered for it.
+    expect(stages('bug')).toEqual([{ values: ['接受/处理|处理中'], custom: true }, { values: ['已解决'], custom: true }, { values: [], custom: true }])
+    expect(stages('task')).toEqual([{ values: ['进行中'], custom: false }, { values: ['已完成'], custom: false }, { values: ['已完成'], custom: false }])
+    // Antumi from before lanes still reads the source's own rules.
+    expect(source?.writebackRules?.review).toMatchObject({ presets: [{ value: '已完成|已实现|已解决' }] })
   })
 
   it('moves a bug by its status key and reports where it landed', async () => {

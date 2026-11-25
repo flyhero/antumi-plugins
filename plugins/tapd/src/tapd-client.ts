@@ -4,19 +4,21 @@ import TurndownService from 'turndown'
 import {
   commentPage, commentState, MAX_ISSUE_TITLE_LENGTH, MAX_SNAPSHOT_LENGTH, SourceComment, SourceError,
   type SourceCommentOptions, type SourceCommentPage, type SourceCommentResult, type SourceIssue, type SourceIssueDetail, type SourceSettings,
-  type SourceStatusResult, type SourceTransitions
+  type SourceStatusResult, type SourceTransitions, type SourceUser
 } from '@antumi/plugin-sdk'
 import { markdownToHtml } from './tapd-html.js'
 import { category, priorityName, TASK_LAST_STEPS, TASK_STATUSES, typeName } from './tapd-status.js'
 import { API, itemKey, itemUrl, parseWorkspaces, WEB, type ItemKind } from './tapd-url.js'
 
 const Text = z.union([z.string(), z.number()]).nullish().transform((value) => value == null ? '' : String(value))
+// A person field TAPD left out says nothing about who it is; one it sent empty says no one.
+const People = z.union([z.string(), z.number()]).nullish().transform((value) => value === undefined ? undefined : value === null ? '' : String(value))
 // IDs are 19 digits, past what a JSON number keeps exact, so only strings are trusted.
 const Id = z.string().regex(/^[1-9][0-9]{0,18}$/)
 const Envelope = z.object({ status: z.coerce.number(), info: z.string().nullish(), data: z.unknown() })
 const Meta = z.object({ meta: z.object({ request_id: z.string().regex(/^[A-Za-z0-9-]{1,64}$/) }) })
 const Item = z.object({
-  id: Id, name: Text, title: Text, status: Text, owner: Text, current_owner: Text, creator: Text, reporter: Text,
+  id: Id, name: Text, title: Text, status: Text, owner: People, current_owner: People, creator: People, reporter: People,
   priority: Text, priority_label: Text, created: Text, modified: Text, description: z.string().nullish(), workitem_type_id: Text
 })
 const Comment = z.object({ id: Id, description: Text, author: Text, created: Text, modified: Text })
@@ -48,7 +50,7 @@ type Item = z.infer<typeof Item>
 type Wait = (ms: number, signal: AbortSignal) => Promise<void>
 type Space = { id: string, name: string, lightweight: boolean }
 type Statuses = { names: Readonly<Record<string, string>>, lastSteps: ReadonlySet<string> | null }
-type Moves = SourceTransitions & { statuses: Statuses }
+type Moves = Pick<SourceTransitions, 'status' | 'statusCategory' | 'options'> & { statuses: Statuses, item: Item }
 
 const markdown = new TurndownService({ headingStyle: 'atx', codeBlockStyle: 'fenced' })
 markdown.remove(['script', 'style', 'iframe'])
@@ -76,6 +78,15 @@ export function people(value: string): string[] {
 }
 
 const owners = (kind: ItemKind, item: Item) => kind === 'bug' ? item.current_owner : item.owner
+const creator = (kind: ItemKind, item: Item) => kind === 'bug' ? item.reporter : item.creator
+
+// TAPD knows people by nick alone, so a nick is the id; trimmed as people() trims the owners it splits.
+function person(nick: string, name = ''): SourceUser | null {
+  const id = nick.trim()
+  return id && id.length <= 500 ? { id, name: (name.trim() || id).slice(0, 200) } : null
+}
+
+const scope = (id: string, name: string) => ({ id, name: (name || id).slice(0, 200) })
 
 export class TapdClient {
   constructor(
@@ -114,7 +125,7 @@ export class TapdClient {
       const filter = owner ? { [kind === 'bug' ? 'current_owner' : 'owner']: owner } : {}
       const items = await this.items(kind, { workspace_id: space.id, limit: String(PAGE), page: String(page), order: 'modified desc', ...filter }, signal)
       for (const item of items) {
-        if (owner && !people(owners(kind, item)).includes(owner)) continue
+        if (owner && !people(owners(kind, item) ?? '').includes(owner)) continue
         const issue = this.summary(kind, item, space, statuses, labelProject)
         if (!all && issue.statusCategory === 'done') continue
         found.push(issue)
@@ -150,12 +161,12 @@ export class TapdClient {
     // Comments and attachments are extras; the item itself is what was asked for.
     const comments = await this.comments(workspace, kind, id, issue.url, signal).catch((failure: unknown) => { if (signal.aborted) throw failure; return null })
     const files = await this.attachments(workspace, kind, id, signal).catch((failure: unknown) => { if (signal.aborted) throw failure; return null })
-    const creator = kind === 'bug' ? item.reporter : item.creator
+    const author = creator(kind, item)
     const text = [
       `# ${issue.key} ${issue.title}`,
       [
         `类型：${typeName[kind]}`, `状态：${issue.status}`, ...(issue.priority ? [`优先级：${issue.priority}`] : []),
-        `处理人：${people(owners(kind, item)).join('、') || '无'}`, ...(creator ? [`创建人：${creator}`] : []),
+        `处理人：${people(owners(kind, item) ?? '').join('、') || '无'}`, ...(author ? [`创建人：${author}`] : []),
         ...(item.created ? [`创建时间：${item.created}`] : []), ...(item.modified ? [`更新时间：${item.modified}`] : []),
         `项目：${space.name || space.id}`
       ].join('\n'),
@@ -171,9 +182,28 @@ export class TapdClient {
     return commentPage(await this.comments(workspace, kind, id, itemUrl(workspace, kind, id, space.lightweight), signal), options)
   }
 
+  // Besides the moves: who the item is with and what it is, as TAPD has them now. Facts only, and one
+  // TAPD did not give is left out; whose the item is, Antumi works out.
   async transitions(workspace: string, kind: ItemKind, id: string, signal: AbortSignal): Promise<SourceTransitions> {
-    const { status, statusCategory, options } = await this.moves(workspace, kind, id, signal)
-    return { status, statusCategory, options }
+    const { status, statusCategory, options, item } = await this.moves(workspace, kind, id, signal)
+    const user = await this.user(signal)
+    const viewer = person(user.nick, user.name)
+    // Only the project's name comes from here, and the id stands in for it.
+    const space = await this.workspace(workspace, signal).catch((failure: unknown) => { if (signal.aborted) throw failure; return null })
+    const handlers = owners(kind, item)
+    const nicks = [...new Set(people(handlers ?? ''))]
+    const assignees = nicks.flatMap((nick) => person(nick) ?? [])
+    const reporter = creator(kind, item)
+    return {
+      status, statusCategory, options,
+      ...(item.status && item.status.length <= 500 ? { statusId: item.status } : {}),
+      ...(viewer ? { viewer } : {}),
+      // A list this cannot carry whole would read as fewer handlers than there are.
+      ...(handlers !== undefined && assignees.length === nicks.length && nicks.length <= 50 ? { assignees } : {}),
+      ...(reporter === undefined ? {} : { reporter: person(reporter) }),
+      type: { id: kind, name: typeName[kind] },
+      scope: scope(workspace, space?.name ?? '')
+    }
   }
 
   // The option's id is the target status key; it is checked against the workflow read just now.
@@ -217,9 +247,9 @@ export class TapdClient {
       .slice(0, 100)
       .map((key) => {
         const { status, statusCategory } = this.status(key, statuses)
-        return { id: key, name: status, category: statusCategory }
+        return { id: key, name: status, category: statusCategory, toStatusId: key }
       })
-    return { ...this.status(item.status, statuses), options, statuses }
+    return { ...this.status(item.status, statuses), options, statuses, item }
   }
 
   private status(key: string, statuses: Statuses): SourceStatusResult {
@@ -232,7 +262,9 @@ export class TapdClient {
       key: itemKey({ kind, id: item.id }), title: title.slice(0, MAX_ISSUE_TITLE_LENGTH),
       url: itemUrl(space.id, kind, item.id, space.lightweight),
       ...this.status(item.status, statuses),
-      type: (labelProject ? `${typeName[kind]} · ${space.name || space.id}` : typeName[kind]).slice(0, 100), priority: priorityName(item.priority_label, item.priority), updatedAt: time(item.modified || item.created)
+      type: (labelProject ? `${typeName[kind]} · ${space.name || space.id}` : typeName[kind]).slice(0, 100), priority: priorityName(item.priority_label, item.priority), updatedAt: time(item.modified || item.created),
+      // The kind itself, without the project the label may carry.
+      typeId: kind, scope: scope(space.id, space.name)
     }
   }
 
