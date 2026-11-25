@@ -23,6 +23,8 @@
 
 「设置 → 集成 → Linear → 回写」预设了 Linear [默认工作流](https://linear.app/docs/configuring-workflows)的 In Progress 和 Done；默认工作流没有 In Review，团队加了才在提交验收里填。改过状态名的，选「自己填…」。
 
+按规则回写时，Antumi 只改指派给你的事项：事项改派给别人（比如交给测试）后，不再改它的状态，也不再发评论。在任务页手动改状态、写评论不受这条限制；需要更新后的 Antumi。
+
 写入需要 API Key 有 **Write** 权限。只有 Read 权限的旧 Key 照常同步，但回写会提示「没有写权限」；到 Linear 新建一个带 Write 权限的 Key，在「设置 → 集成 → Linear」重新登录即可。评论以 API Key 所属账号的身份发出。
 
 ## 独立开发

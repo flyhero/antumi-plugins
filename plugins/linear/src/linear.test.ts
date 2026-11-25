@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { SourceIssue } from '@antumi/plugin-sdk'
 import { LinearClient } from './linear-client.js'
 import { linearSource } from './linear-source.js'
 
@@ -59,6 +60,24 @@ describe('Linear source', () => {
     expect(issue.markdown).toContain('Bob')
     expect(issue.markdown).toContain('Confirmed')
     expect(issue.markdown.length).toBeLessThanOrEqual(50_000)
+  })
+
+  it('says which team an issue is in, on the list and on the issue itself', async () => {
+    const team = { id: 'team-uuid', name: 'Engineering' }
+    const list = vi.fn<typeof fetch>().mockResolvedValue(response({ issues: { nodes: [{ ...row, team }, { ...row, identifier: 'ENG-13' }], pageInfo: { hasNextPage: false, endCursor: null } } }))
+    const issues = await new LinearClient('key', list).list({ assignee: '', state: 'all' }, signal)
+    expect(issues[0]).toMatchObject({ key: 'ENG-12', type: 'Bug', scope: team })
+    expect(SourceIssue.parse(issues[0])).toEqual(issues[0])
+    // Linear has no issue types, and a row without its team says nothing of one.
+    expect(issues[0]).not.toHaveProperty('typeId')
+    expect(issues[1]).not.toHaveProperty('scope')
+    expect(list.mock.calls[0]?.[1]?.body).toContain('team { id name }')
+
+    const detail = vi.fn<typeof fetch>().mockResolvedValue(response({ issue: { ...row, team, description: '', creator: null, assignee: null, comments: { nodes: [] } } }))
+    const issue = await new LinearClient('key', detail).issue('ENG-12', signal)
+    expect(issue).toMatchObject({ key: 'ENG-12', scope: team })
+    expect(issue).not.toHaveProperty('typeId')
+    expect(detail.mock.calls[0]?.[1]?.body).toContain('team { id name }')
   })
 
   it('rejects GraphQL errors even when partial data arrives with HTTP 200', async () => {

@@ -5,11 +5,15 @@ import type { SourceCommentResult, SourceStatusResult, SourceTransitionOption, S
 
 const ENDPOINT = 'https://api.linear.app/graphql'
 const Person = z.object({ name: z.string(), email: z.string().optional() })
+// Someone or something Linear names by a UUID that never changes. One that does not read as such
+// is left out, never a reason to fail the call it rides on.
+const Named = z.object({ id: z.string(), name: z.string() }).nullable().optional().catch(undefined)
 const Row = z.object({
   identifier: z.string(), title: z.string(), url: z.string(), updatedAt: z.string(),
   priority: z.number(), priorityLabel: z.string(),
   state: z.object({ name: z.string(), type: z.string() }),
-  labels: z.object({ nodes: z.array(z.object({ name: z.string() })) })
+  labels: z.object({ nodes: z.array(z.object({ name: z.string() })) }),
+  team: Named
 })
 const Page = z.object({
   issues: z.object({ nodes: z.array(Row), pageInfo: z.object({ hasNextPage: z.boolean(), endCursor: z.string().nullable() }) })
@@ -25,9 +29,9 @@ const Envelope = z.object({
   errors: z.array(z.object({ message: z.string().optional(), extensions: z.object({ code: z.string().optional(), type: z.string().optional() }).passthrough().optional() }).passthrough()).optional()
 })
 const State = z.object({ id: z.string(), name: z.string(), type: z.string() })
-const Workflow = z.object({ issue: z.object({
-  id: z.string(), identifier: z.string(), state: State,
-  team: z.object({ states: z.object({ nodes: z.array(State.extend({ position: z.number() })) }) })
+const Workflow = z.object({ viewer: Named, issue: z.object({
+  id: z.string(), identifier: z.string(), state: State, assignee: Named, creator: Named,
+  team: z.object({ id: z.string().optional().catch(undefined), name: z.string().optional().catch(undefined), states: z.object({ nodes: z.array(State.extend({ position: z.number() })) }) })
 }).nullable() })
 const Updated = z.object({ issueUpdate: z.object({ success: z.boolean(), issue: z.object({ state: State }).nullable() }) })
 const Created = z.object({ commentCreate: z.object({ success: z.boolean(), comment: z.object({ id: z.string(), url: z.string().nullable().optional() }) }) })
@@ -40,11 +44,13 @@ const CATEGORIES: Record<string, SourceIssue['statusCategory']> = {
 const TYPE_ORDER = ['triage', 'backlog', 'unstarted', 'started', 'completed', 'canceled']
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const WRITE_FORBIDDEN = 'Linear API Key 没有写权限，请用具有 Write 权限的 API Key 重新登录'
+// The account, the issue's people and its team ride on the read every write already makes.
 const WORKFLOW_QUERY = `query AntumiWorkflow($id: String!) {
-  issue(id: $id) { id identifier state { id name type } team { states(first: 100) { nodes { id name type position } } } }
+  viewer { id name }
+  issue(id: $id) { id identifier state { id name type } assignee { id name } creator { id name } team { id key name states(first: 100) { nodes { id name type position } } } }
 }`
 
-export const ISSUE_FIELDS = 'identifier title url updatedAt priority priorityLabel state { name type } labels { nodes { name } }'
+export const ISSUE_FIELDS = 'identifier title url updatedAt priority priorityLabel state { name type } labels { nodes { name } } team { id name }'
 export const LIST_QUERY = `query AntumiIssues($filter: IssueFilter, $after: String) {
   issues(first: 50, after: $after, orderBy: updatedAt, filter: $filter) {
     nodes { ${ISSUE_FIELDS} }
@@ -80,12 +86,20 @@ function status(state: z.infer<typeof State>): SourceStatusResult {
 
 type QueryOptions = { write?: boolean }
 
+// A fact in the shape the host takes, or nothing when Linear gave none it would accept.
+function named(value: { id?: string, name?: string } | null | undefined): { id: string, name: string } | undefined {
+  if (!value?.id || value.id.length > 500 || value.name === undefined) return undefined
+  return { id: value.id, name: value.name.slice(0, 200) }
+}
+
 function summarize(row: z.infer<typeof Row>): SourceIssue {
+  const scope = named(row.team)
   return {
     key: row.identifier, title: row.title.slice(0, MAX_ISSUE_TITLE_LENGTH), url: row.url,
     status: row.state.name, statusCategory: category(row.state.type),
     type: row.labels.nodes.some((label) => /^(bug|defect|缺陷)$/i.test(label.name)) ? 'Bug' : 'Issue',
-    priority: row.priority === 0 ? null : row.priorityLabel.slice(0, 100), updatedAt: time(row.updatedAt)
+    priority: row.priority === 0 ? null : row.priorityLabel.slice(0, 100), updatedAt: time(row.updatedAt),
+    ...(scope ? { scope } : {})
   }
 }
 
@@ -159,20 +173,34 @@ export class LinearClient {
     return commentPage(comments, options)
   }
 
+  // Besides the moves: who the issue is with and where it is, as Linear has it now. Whose it is
+  // is the host's to work out; a fact Linear did not give is left out. Linear has no issue types.
   async transitions(key: string, signal: AbortSignal): Promise<SourceTransitions> {
-    const issue = await this.workflow(key, signal)
+    const { issue, viewer } = await this.workflow(key, signal)
     const order = (type: string) => { const index = TYPE_ORDER.indexOf(type); return index < 0 ? TYPE_ORDER.length : index }
     const options: SourceTransitionOption[] = issue.team.states.nodes
       // Moving into the duplicate status needs a duplicate relation, which a status change cannot make.
       .filter((state) => state.id !== issue.state.id && state.type !== 'duplicate' && state.name.trim())
       .sort((a, b) => order(a.type) - order(b.type) || a.position - b.position)
       .slice(0, 100)
-      .map((state) => ({ id: state.id, name: state.name.slice(0, 100), category: category(state.type) }))
-    return { ...status(issue.state), options }
+      .map((state) => ({ id: state.id, name: state.name.slice(0, 100), category: category(state.type), toStatusId: state.id }))
+    const me = named(viewer)
+    const assignee = named(issue.assignee)
+    const creator = named(issue.creator)
+    const scope = named(issue.team)
+    return {
+      ...status(issue.state), options,
+      ...(issue.state.id && issue.state.id.length <= 500 ? { statusId: issue.state.id } : {}),
+      ...(me ? { viewer: me } : {}),
+      // null is Linear saying no one has it; an assignee that did not read is not known either way.
+      ...(issue.assignee === null ? { assignees: [] } : assignee ? { assignees: [assignee] } : {}),
+      ...(issue.creator === null ? { reporter: null } : creator ? { reporter: creator } : {}),
+      ...(scope ? { scope } : {})
+    }
   }
 
   async transition(key: string, id: string, signal: AbortSignal): Promise<SourceStatusResult> {
-    const issue = await this.workflow(key, signal)
+    const { issue } = await this.workflow(key, signal)
     // Someone else may have made the same move since the options were read.
     if (id === issue.state.id) return status(issue.state)
     const target = issue.team.states.nodes.find((state) => state.id === id && state.type !== 'duplicate')
@@ -211,12 +239,13 @@ export class LinearClient {
   }
 
   private async workflow(key: string, signal: AbortSignal) {
-    let issue: z.infer<typeof Workflow>['issue']
-    try { issue = parse(Workflow, await this.query(WORKFLOW_QUERY, { id: key }, signal)).issue }
+    let data: z.infer<typeof Workflow>
+    try { data = parse(Workflow, await this.query(WORKFLOW_QUERY, { id: key }, signal)) }
     catch (failure) { throw this.writeFailure(failure, key) }
+    const { issue, viewer } = data
     if (!issue) throw new SourceError('not-found', `Linear 中没有 ${key}`)
     if (issue.identifier.toUpperCase() !== key.toUpperCase()) throw new SourceError('request-failed', 'Linear 返回的事项编号不匹配')
-    return issue
+    return { issue, viewer }
   }
 
   private writeFailure(failure: unknown, key: string): unknown {

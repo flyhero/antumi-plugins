@@ -16,9 +16,17 @@ const states = [
   { id: 'cancel', name: 'Canceled', type: 'canceled', position: 0 },
   { id: 'odd', name: 'Custom', type: 'mystery', position: 0 }
 ]
-const workflow = (state = states[4]) => Response.json({ data: { issue: {
-  id: 'issue-uuid', identifier: 'ENG-12', state, team: { states: { nodes: states } }
-} } })
+const ann = { id: 'user-ann', name: 'Ann' }
+const bob = { id: 'user-bob', name: 'Bob' }
+const team = { id: 'team-uuid', key: 'ENG', name: 'Engineering' }
+const workflow = (state = states[4], people: { viewer?: unknown, assignee?: unknown, creator?: unknown } = {}) => Response.json({ data: {
+  viewer: 'viewer' in people ? people.viewer : ann,
+  issue: {
+    id: 'issue-uuid', identifier: 'ENG-12', state,
+    assignee: 'assignee' in people ? people.assignee : ann, creator: 'creator' in people ? people.creator : bob,
+    team: { ...team, states: { nodes: states } }
+  }
+} })
 const body = (fetcher: ReturnType<typeof vi.fn<typeof fetch>>, call: number) => {
   const value = fetcher.mock.calls[call]?.[1]?.body
   if (typeof value !== 'string') throw new Error('Missing request body')
@@ -31,16 +39,48 @@ describe('Linear writeback', () => {
     const fetcher = vi.fn<typeof fetch>().mockImplementation(async () => workflow())
     const result = await source(fetcher).transitions?.({}, credential, 'eng-12', signal)
     for (const option of result?.options ?? []) expect(SourceTransitionOption.parse(option)).toEqual(option)
-    expect(result).toEqual({ status: 'Todo', statusCategory: 'todo', options: [
-      { id: 'backlog', name: 'Backlog', category: 'todo' },
-      { id: 'progress', name: 'In Progress', category: 'doing' },
-      { id: 'review', name: 'In Review', category: 'doing' },
-      { id: 'done', name: 'Done', category: 'done' },
-      { id: 'cancel', name: 'Canceled', category: 'done' },
-      { id: 'odd', name: 'Custom', category: 'unknown' }
-    ] })
+    expect(result).toEqual({ status: 'Todo', statusCategory: 'todo', statusId: 'todo', options: [
+      { id: 'backlog', name: 'Backlog', category: 'todo', toStatusId: 'backlog' },
+      { id: 'progress', name: 'In Progress', category: 'doing', toStatusId: 'progress' },
+      { id: 'review', name: 'In Review', category: 'doing', toStatusId: 'review' },
+      { id: 'done', name: 'Done', category: 'done', toStatusId: 'done' },
+      { id: 'cancel', name: 'Canceled', category: 'done', toStatusId: 'cancel' },
+      { id: 'odd', name: 'Custom', category: 'unknown', toStatusId: 'odd' }
+    ], viewer: ann, assignees: [ann], reporter: bob, scope: { id: 'team-uuid', name: 'Engineering' } })
     expect(body(fetcher, 0).variables).toEqual({ id: 'ENG-12' })
     expect(fetcher.mock.calls[0]?.[1]).toMatchObject({ headers: { Authorization: 'secret' }, redirect: 'error' })
+  })
+
+  it('reports who the issue is with and its team from the one read of its workflow', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async () => workflow(states[2], { assignee: bob }))
+    const result = await source(fetcher).transitions?.({}, credential, 'ENG-12', signal)
+    expect(result).toMatchObject({ statusId: 'progress', viewer: ann, assignees: [bob], reporter: bob, scope: { id: 'team-uuid', name: 'Engineering' } })
+    // Linear has no issue types, so there is none to report.
+    expect(result).not.toHaveProperty('type')
+    for (const option of result?.options ?? []) expect(SourceTransitionOption.parse(option)).toMatchObject({ toStatusId: option.id })
+    expect(fetcher).toHaveBeenCalledTimes(1)
+    const { query } = body(fetcher, 0)
+    for (const field of ['viewer { id name }', 'assignee { id name }', 'creator { id name }', 'team { id key name']) expect(query).toContain(field)
+  })
+
+  it('reports an unassigned issue as with no one, and one an integration made as without a reporter', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async () => workflow(states[4], { assignee: null, creator: null }))
+    const result = await source(fetcher).transitions?.({}, credential, 'ENG-12', signal)
+    expect(result).toMatchObject({ viewer: ann, assignees: [], reporter: null })
+  })
+
+  it('leaves out a fact Linear did not give, and cuts a name to what Antumi takes', async () => {
+    const bare = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ data: { issue: { id: 'issue-uuid', identifier: 'ENG-12', state: states[4], team: { states: { nodes: states } } } } }))
+    const result = await source(bare).transitions?.({}, credential, 'ENG-12', signal)
+    expect(result).toMatchObject({ status: 'Todo', statusId: 'todo' })
+    for (const fact of ['viewer', 'assignees', 'reporter', 'scope', 'type']) expect(result).not.toHaveProperty(fact)
+
+    // An assignee that does not read is unknown, not no one: Antumi must not take the issue for unassigned.
+    const odd = vi.fn<typeof fetch>().mockResolvedValue(workflow(states[4], { viewer: { id: '', name: 'Ann' }, assignee: { name: 'No id' }, creator: { id: 'user-long', name: 'x'.repeat(300) } }))
+    const partial = await source(odd).transitions?.({}, credential, 'ENG-12', signal)
+    expect(partial).not.toHaveProperty('viewer')
+    expect(partial).not.toHaveProperty('assignees')
+    expect(partial?.reporter).toEqual({ id: 'user-long', name: 'x'.repeat(200) })
   })
 
   it('moves the issue by its UUID to a status of its team', async () => {
