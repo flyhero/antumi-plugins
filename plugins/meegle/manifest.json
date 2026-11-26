@@ -2,7 +2,7 @@
   "id": "antumi.meegle",
   "version": "0.3.0",
   "engines": {
-    "antumi": ">=0.15.11 <1.0.0"
+    "antumi": ">=0.20.0-beta.2 <1.0.0"
   },
   "contributes": {
     "sources": [
@@ -10,7 +10,34 @@
         "id": "meegle",
         "name": "飞书项目 / Meegle",
         "writeback": 1,
-        "writebackRules": {"start": {"placeholder": "如：处理中", "hint": "节点流的工作项填动作名，如「完成节点「开发」」。飞书项目的状态没有分类，「不会把状态往回改」对它不生效（已终止的工作项除外）。", "translations": {"en": {"placeholder": "e.g. 处理中", "hint": "For node-flow items, enter the action, e.g. 完成节点「开发」. Meegle statuses have no categories, so “never moved backwards” does not hold here (except for terminated items)."}}}, "review": {"placeholder": "如：待验收", "translations": {"en": {"placeholder": "e.g. 待验收"}}}, "done": {"placeholder": "如：已完成", "translations": {"en": {"placeholder": "e.g. 已完成"}}}},
+        "writebackRules": {
+          "start": {
+            "placeholder": "如：处理中",
+            "hint": "状态流填写实际状态名；节点流仅列出当前账号负责且进行中的节点，动作名例如「完成节点「开发」」，通常配置在提交验收时。状态无通用分类，无法保证不倒退。",
+            "translations": {
+              "en": {
+                "placeholder": "e.g. 处理中",
+                "hint": "Use actual state names for state flows. Node flows offer only active nodes owned by the current account; configure completion on review. Status categories are unavailable, so backward moves cannot be detected."
+              }
+            }
+          },
+          "review": {
+            "placeholder": "如：待验收",
+            "translations": {
+              "en": {
+                "placeholder": "e.g. 待验收"
+              }
+            }
+          },
+          "done": {
+            "placeholder": "如：已完成",
+            "translations": {
+              "en": {
+                "placeholder": "e.g. 已完成"
+              }
+            }
+          }
+        },
         "settings": [
           {
             "key": "space",
@@ -30,15 +57,15 @@
           {
             "key": "types",
             "type": "text",
-            "label": "工作项类型",
-            "required": true,
+            "label": "同步类型",
+            "required": false,
             "default": "story,issue",
             "mono": true,
-            "hint": "工作项类型的 key，逗号分隔。默认是需求（story）和缺陷（issue）；填错时同步会列出空间里可用的类型。",
+            "hint": "默认同步需求（story）和缺陷（issue），一般无需修改。自定义类型可填写类型 key，用逗号分隔；同步后会出现在回写规则中。",
             "translations": {
               "en": {
-                "label": "Work item types",
-                "hint": "Comma-separated type keys. Defaults to stories (story) and issues (issue); a wrong key makes the sync list the space's types."
+                "label": "Types to sync",
+                "hint": "Defaults to stories (story) and defects (issue). For custom types, enter comma-separated type keys; discovered types appear in writeback rules."
               }
             }
           },
@@ -48,12 +75,33 @@
             "label": "筛选条件（MQL）",
             "required": true,
             "mono": true,
-            "default": "array_contains(all_participate_persons(), current_login_user())",
-            "hint": "只写 WHERE 后面的条件，按字段 key 书写。默认是我参与的工作项；当前负责人是我：array_contains(`current_status_operator`, current_login_user())；我创建的：`owner` = current_login_user()。",
+            "default": "array_contains(`current_status_operator`, current_login_user())",
+            "hint": "默认同步当前由我负责的工作项；已有筛选条件会保留。可填写 WHERE 后面的 MQL 条件，例如我参与的：array_contains(all_participate_persons(), current_login_user())。",
             "translations": {
               "en": {
                 "label": "Filter (MQL)",
-                "hint": "Only the condition after WHERE, written with field keys. Defaults to items I take part in. Currently mine: array_contains(`current_status_operator`, current_login_user()); created by me: `owner` = current_login_user()."
+                "hint": "Defaults to items currently assigned to you; existing filters are preserved. Enter the MQL condition after WHERE; all participation: array_contains(all_participate_persons(), current_login_user())."
+              }
+            }
+          }
+        ],
+        "commentSync": 1,
+        "writebackTypes": [
+          {
+            "id": "story",
+            "label": "需求",
+            "translations": {
+              "en": {
+                "label": "Story"
+              }
+            }
+          },
+          {
+            "id": "issue",
+            "label": "缺陷",
+            "translations": {
+              "en": {
+                "label": "Defect"
               }
             }
           }

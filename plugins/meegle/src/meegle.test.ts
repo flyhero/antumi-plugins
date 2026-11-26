@@ -62,7 +62,7 @@ describe('space address', () => {
 
 describe('MQL', () => {
   it('wraps the user condition with the space, the type and the columns the inbox reads', () => {
-    expect(buildMql('shop', 'issue', DEFAULT_FILTER)).toBe('SELECT `work_item_id`, `name`, `work_item_status`, `updated_at`, `priority` FROM `shop`.`issue` WHERE array_contains(all_participate_persons(), current_login_user()) ORDER BY `updated_at` DESC')
+    expect(buildMql('shop', 'issue', DEFAULT_FILTER)).toBe('SELECT `work_item_id`, `name`, `work_item_status`, `updated_at`, `priority` FROM `shop`.`issue` WHERE array_contains(`current_status_operator`, current_login_user()) ORDER BY `updated_at` DESC')
     expect(buildMql('shop', 'issue', DEFAULT_FILTER, [])).toContain('SELECT `work_item_id`, `name`, `work_item_status`, `updated_at` FROM')
     expect(buildMql('sh`op', 'story', '`owner` = current_login_user()')).toContain('FROM `shop`.`story` WHERE `owner` = current_login_user() ORDER BY')
   })
@@ -144,7 +144,7 @@ describe('sync', () => {
     })
     const issues = await new MeegleClient(session).list(space, { types: ['story', 'issue'], filter: DEFAULT_FILTER }, signal)
     expect(issues).toHaveLength(52)
-    expect(issues[0]).toEqual({ key: '7', title: 'Crash', url: 'https://project.larksuite.com/shop/issue/detail/7', status: 'In progress', statusCategory: 'unknown', type: 'Defect', priority: 'P1', updatedAt: Date.UTC(2026, 10, 21) })
+    expect(issues[0]).toEqual({ key: '7', title: 'Crash', url: 'https://project.larksuite.com/shop/issue/detail/7', status: 'In progress', statusCategory: 'unknown', type: 'Defect', typeId: 'issue', scope: { id: 'shop', name: 'shop' }, priority: 'P1', updatedAt: Date.UTC(2026, 10, 21) })
     expect(calls.map((call) => call.name)).toEqual(['list_workitem_types', 'search_by_mql', 'search_by_mql', 'search_by_mql'])
     expect(calls[2]?.args).toEqual({ project_key: 'shop', session_id: 's1', group_pagination_list: [{ group_id: '1', page_num: 2 }] })
   })
@@ -240,7 +240,7 @@ describe('writeback', () => {
     work_item_name: 'Fix login', work_item_type: { key: 'issue', name: 'Defect', api_name: 'issue' }, owned_project: { key: '63ab', simple_name: 'shop' },
     work_item_status: { key: 'OPEN', name: '待处理' }, ...extra
   })
-  const brief = (status = { key: 'OPEN', name: '待处理' }, nodes: object[] = []) => () => ({ work_item_attribute: attribute({ work_item_status: status }), work_item_current_node: nodes, work_item_fields: [], pagination: { has_more: true, next_page_token: 'p2' } })
+  const brief = (status = { key: 'OPEN', name: '待处理' }, nodes: object[] = []) => () => ({ work_item_attribute: attribute({ work_item_status: status }), work_item_current_node: nodes, work_item_fields: [], pagination: { has_more: false } })
   const me = () => [{ user_key: '7001', name_cn: '安' }]
   const states = () => [
     { id: 24640610, state_name: '待处理', state_key: 'OPEN' },
@@ -252,7 +252,7 @@ describe('writeback', () => {
   it('lists the next states of a state flow, leaving out the current one', async () => {
     const { session, calls } = server({ get_workitem_brief: brief(), search_user_info: me, get_transitable_states: states })
     expect(await source(session).transitions?.(settings, credential, '#12', signal)).toEqual({
-      status: '待处理', statusCategory: 'unknown',
+      status: '待处理', statusCategory: 'unknown', statusId: 'OPEN', viewer: {id: '7001', name: '安'}, type: {id: 'issue',name: 'Defect'}, scope: {id:'shop',name:'shop'},
       options: [{ id: 'state:24640619', name: '处理中', category: 'unknown' }, { id: 'state:24640620', name: '已完成', category: 'unknown' }]
     })
     expect(calls.map((call) => call.name)).toEqual(['get_workitem_brief', 'search_user_info', 'get_transitable_states'])
@@ -264,7 +264,7 @@ describe('writeback', () => {
       get_workitem_brief: () => ({ work_item_attribute: attribute({ is_aborted: true, work_item_status: { key: 'CLOSED', name: '已关闭' } }) }),
       search_user_info: me, get_transitable_states: () => ({ data: [{ id: 5, state_name: '重新打开', state_key: 'REOPEN' }] })
     })
-    expect(await source(session).transitions?.(settings, credential, '12', signal)).toEqual({ status: '已关闭', statusCategory: 'done', options: [{ id: 'state:5', name: '重新打开', category: 'unknown' }] })
+    expect(await source(session).transitions?.(settings, credential, '12', signal)).toEqual({ status: '已关闭', statusCategory: 'done', statusId:'CLOSED', viewer:{id:'7001',name:'安'}, type:{id:'issue',name:'Defect'}, scope:{id:'shop',name:'shop'}, options: [{ id: 'state:5', name: '重新打开', category: 'unknown' }] })
   })
 
   it('moves a state flow by a listed transition and reads the status back', async () => {
@@ -288,15 +288,16 @@ describe('writeback', () => {
 
   it('offers completing the nodes in progress for a node flow', async () => {
     const { session, calls } = server({
-      get_workitem_brief: brief({ key: 'started', name: '进行中' }, [{ name: '开发' }]),
+      get_workitem_brief: brief({ key: 'started', name: '进行中' }, [{ name: '开发', owners:[{user_key:'7001', name_cn:'安'}] }]),
+      search_user_info: me,
       get_node_detail: () => ({ nodes: [{ node_key: 'state_dev', name: '开发', status: 'doing' }, { node_key: 'state_test', name: '测试', status: 'not_started' }] }),
       transition_node: () => ({})
     })
     const plugin = source(session)
     expect(await plugin.transitions?.(settings, credential, '12', signal)).toEqual({
-      status: '进行中', statusCategory: 'unknown', options: [{ id: 'node:state_dev', name: '「开发」已完成', action: '完成节点「开发」', category: 'unknown' }]
+      status: '进行中', statusCategory: 'unknown', statusId:'started', viewer:{id:'7001',name:'安'}, assignees:[{id:'7001',name:'安'}], type:{id:'issue',name:'Defect'}, scope:{id:'shop',name:'shop'}, options: [{ id: 'node:state_dev', name: '「开发」已完成', action: '完成节点「开发」', category: 'unknown' }]
     })
-    expect(calls[1]?.args).toMatchObject({ project_key: '63ab', work_item_id: '12', node_id_list: ['开发'] })
+    expect(calls.find(call=>call.name==='get_node_detail')?.args).toMatchObject({ project_key: '63ab', work_item_id: '12', node_id_list: ['开发'] })
     await plugin.transition?.(settings, credential, '12', 'node:state_dev', signal)
     expect(calls.find((call) => call.name === 'transition_node')?.args).toEqual({ project_key: '63ab', work_item_id: '12', node_id: 'state_dev', action: 'confirm' })
   })
@@ -354,3 +355,59 @@ describe('writeback', () => {
     expect(commentMarkdown('a <!-- open')).toBe('a')
   })
 })
+
+describe('automation facts and incremental comments', () => {
+  const attributes = { work_item_name:'Bug', work_item_type:{key:'custom-bug',name:'缺陷',api_name:'issue'}, owned_project:{key:'63ab',simple_name:'shop',name:'Shop'}, work_item_status:{key:'OPEN',name:'待处理'} }
+  const me = () => [{user_key:'7001',name_cn:'安'}]
+  const states = () => []
+  it('reads ownership from later field pages and keeps stable type and project identities', async () => {
+    const {session} = server({search_user_info:me, get_transitable_states:states, get_workitem_brief:args=>args.page_token ? {work_item_attribute:attributes,work_item_fields:[{key:'current_status_operator',value:[{key:'7001',name:'安'}]}]} : {work_item_attribute:attributes,pagination:{has_more:true,next_page_token:'owners'}}})
+    expect(await new MeegleClient(session).transitions(space,'12',signal)).toMatchObject({viewer:{id:'7001'},assignees:[{id:'7001'}],type:{id:'custom-bug'},scope:{id:'shop',name:'Shop'}})
+  })
+  it.each([undefined, [{name:'安'}], [{key:'7001'},{name:'Unknown'}]])('does not turn missing or partial identities into sole ownership: %j', async value=>{
+    const {session} = server({search_user_info:me,get_transitable_states:states,get_workitem_brief:()=>({work_item_attribute:attributes,work_item_fields:value===undefined?[]:[{key:'current_status_operator',value}]})})
+    expect((await new MeegleClient(session).transitions(space,'12',signal)).assignees).toBeUndefined()
+  })
+  it('only offers the current account’s sole-owned active nodes and rejects stale ownership', async()=>{
+    let owners=[{user_key:'7001'}]
+    const {session,calls}=server({search_user_info:me,get_workitem_brief:()=>({work_item_attribute:{...attributes,pattern:'Node'},work_item_current_node:[{name:'开发',owners},{name:'测试',owners:[{user_key:'7002'}]}]}),get_node_detail:()=>({nodes:[{node_key:'dev',name:'开发',status:'doing'},{node_key:'qa',name:'测试',status:'doing'}]}),transition_node:()=>({})})
+    const client=new MeegleClient(session)
+    expect((await client.transitions(space,'12',signal)).options.map(option=>option.id)).toEqual(['node:dev'])
+    owners=[{user_key:'7002'}]
+    await expect(client.transition(space,'12','node:dev',signal)).rejects.toThrow('不能流转')
+    expect(calls.some(call=>call.name==='transition_node')).toBe(false)
+  })
+  it('paginates same-time comments without loss and keeps native IDs and issue links', async()=>{
+    const items=Array.from({length:121},(_,i)=>({id:String(7300000000000000000n+BigInt(i)),content:`Comment ${i}`,creator:{name:'安'},created_at:'2026-11-26T00:00:00Z'}))
+    const {session}=server({get_workitem_brief:()=>({work_item_attribute:attributes}),list_workitem_comments:args=>({comments:items.slice((Number(args.page_num)-1)*50,Number(args.page_num)*50)})})
+    const client=new MeegleClient(session)
+    const first=await client.commentChanges(space,'12',signal,{checkpoint:{createdAt:0,ids:[]},continuation:null})
+    const second=await client.commentChanges(space,'12',signal,{checkpoint:{createdAt:0,ids:[]},continuation:first.continuation})
+    expect(first.comments.length+second.comments.length).toBe(121)
+    expect(second.checkpoint.ids).toHaveLength(121)
+    expect(first.comments[0]?.url).toBe('https://project.larksuite.com/shop/issue/detail/12')
+    expect((await client.commentChanges(space,'12',signal,{checkpoint:second.checkpoint,continuation:null})).comments).toEqual([])
+  })
+  it('does not advance a comment checkpoint on repeated pages or missing identities', async()=>{
+    for (const comment of [{id:'1',content:'x',created_at:1},{content:'x',created_at:1}]) {
+      const {session}=server({get_workitem_brief:()=>({work_item_attribute:attributes}),list_workitem_comments:()=>({comments:[comment]})})
+      await expect(new MeegleClient(session).commentChanges(space,'12',signal,{checkpoint:{createdAt:0,ids:[]},continuation:null})).rejects.toThrow()
+    }
+  })
+  it('establishes a comment baseline in the issue detail', async()=>{
+    const {session}=server({get_workitem_brief:()=>({work_item_attribute:attributes}),list_workitem_comments:()=>({comments:[{id:'7',content:'Ready',created_at:'2026-11-26T00:00:00Z'}],has_more:false})})
+    const issue=await new MeegleClient(session).issue(space,'12',signal)
+    expect(issue).toMatchObject({typeId:'custom-bug',scope:{id:'shop'},commentState:{checkpoint:{ids:['7']}}})
+    expect(issue.markdown).toContain('所属项目：Shop')
+  })
+})
+
+ it('accepts native comment aliases without rounding identities', async()=>{
+   const {session}=server({get_workitem_brief:()=>({work_item_attribute:{work_item_type:{key:'issue'},owned_project:{key:'63ab',simple_name:'shop'}}}),list_workitem_comments:()=>({list:[{comment_id:'7301234567890123456',content:'Done',create_time:1795651200}],has_more:false})})
+   const result=await new MeegleClient(session).commentChanges(space,'12',signal,{checkpoint:{createdAt:0,ids:[]},continuation:null})
+   expect(result.comments[0]).toMatchObject({id:'7301234567890123456',createdAt:1795651200000})
+ })
+ it.each([{}, {comments:[],has_more:true}])('rejects unrecognized or incomplete empty comment pages: %j',async(reply)=>{
+   const {session}=server({get_workitem_brief:()=>({work_item_attribute:{}}),list_workitem_comments:()=>reply})
+   await expect(new MeegleClient(session).commentChanges(space,'12',signal,{checkpoint:{createdAt:0,ids:[]},continuation:null})).rejects.toThrow()
+ })

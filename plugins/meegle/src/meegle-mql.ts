@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { SourceError } from '@antumi/plugin-sdk'
 
-export const DEFAULT_FILTER = 'array_contains(all_participate_persons(), current_login_user())'
+export const DEFAULT_FILTER = 'array_contains(`current_status_operator`, current_login_user())'
 // 0.1.0's default; not every space has `archiving_status`, so a saved copy reads as today's.
 const FIRST_DEFAULT = 'array_contains(all_participate_persons(), current_login_user()) AND `archiving_status` = false'
 // Fields every work item has; the rest are read when the space has them.

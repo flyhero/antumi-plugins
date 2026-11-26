@@ -1,5 +1,6 @@
 import { z } from 'zod'
-import { MAX_ISSUE_TITLE_LENGTH, MAX_SNAPSHOT_LENGTH, SourceError, type SourceCommentResult, type SourceIssue, type SourceIssueDetail, type SourceStatusResult, type SourceTransitionOption, type SourceTransitions } from '@antumi/plugin-sdk'
+import { commentPage, commentState, SourceComment, type SourceCommentOptions, type SourceCommentPage, MAX_ISSUE_TITLE_LENGTH, MAX_SNAPSHOT_LENGTH, SourceError, type SourceCommentResult, type SourceIssue, type SourceIssueDetail, type SourceStatusResult, type SourceTransitionOption, type SourceTransitions } from '@antumi/plugin-sdk'
+import { people } from './meegle-ownership.js'
 import { UnknownField, type McpSession } from './mcp-session.js'
 import { buildMql, day, MqlPage, OPTIONAL_COLUMNS, rows, type MqlItem } from './meegle-mql.js'
 import { itemUrl, type Space } from './meegle-url.js'
@@ -32,8 +33,12 @@ const Brief = z.object({
   pagination: z.object({ has_more: z.boolean().optional(), next_page_token: z.string().nullish() }).passthrough().nullish()
 }).passthrough()
 type Brief = z.infer<typeof Brief>
-const Comment = z.object({ id: z.union([z.string(), z.number()]).optional(), content: z.string().optional(), creator: z.unknown().optional(), created_at: z.union([z.string(), z.number()]).optional() }).passthrough()
-const Comments = z.object({ comments: z.array(Comment).nullish(), list: z.array(Comment).nullish(), items: z.array(Comment).nullish() }).passthrough()
+const Comment = z.object({
+  id: z.union([z.string(), z.number()]).optional(), comment_id: z.union([z.string(), z.number()]).optional(), content: z.string().optional(), creator: z.unknown().optional(),
+  created_at: z.union([z.string(), z.number()]).optional(), create_time: z.union([z.string(), z.number()]).optional(),
+  updated_at: z.union([z.string(), z.number()]).nullish(), update_time: z.union([z.string(), z.number()]).nullish()
+}).passthrough().transform((row) => ({ ...row, id: row.id ?? row.comment_id, created_at: row.created_at ?? row.create_time, updated_at: row.updated_at ?? row.update_time }))
+const Comments = z.object({ has_more: z.boolean().optional(), total: z.number().int().nonnegative().optional(), pagination: z.object({ has_more: z.boolean().optional() }).nullish(), comments: z.array(Comment).nullish(), list: z.array(Comment).nullish(), items: z.array(Comment).nullish() }).passthrough().refine((value) => value.comments !== undefined || value.list !== undefined || value.items !== undefined)
 
 // Fields shown in their own lines, or whose values only make sense to Meegle's own pages.
 const SHOWN = new Set(['name', 'description', 'priority', 'current_status_operator', 'work_item_status', 'owner', 'created_at', 'updated_at', 'template', 'work_item_type_key'])
@@ -96,8 +101,8 @@ export class MeegleClient {
   }
 
   async transitions(space: Space, id: string, signal: AbortSignal): Promise<SourceTransitions> {
-    const { status, moves } = await this.moves(space, id, signal)
-    return { ...status, options: moves.map((move) => move.option) }
+    const { status, moves, facts } = await this.moves(space, id, signal)
+    return { ...status, ...facts, options: moves.map((move) => move.option) }
   }
 
   // The id is checked against what the issue can do now, so a stale or foreign one moves nothing.
@@ -133,20 +138,25 @@ export class MeegleClient {
   }
 
   // State flows list their next states; node flows move by completing the nodes in progress.
-  private async moves(space: Space, id: string, signal: AbortSignal): Promise<{ status: SourceStatusResult, moves: Move[] }> {
-    const brief = await this.brief(space, id, signal, false)
+  private async moves(space: Space, id: string, signal: AbortSignal): Promise<{ status: SourceStatusResult, moves: Move[], facts: Omit<SourceTransitions, 'status' | 'statusCategory' | 'options'> }> {
+    const brief = await this.brief(space, id, signal)
     const attribute = brief.work_item_attribute
     const project = projectKey(attribute, space)
+    const viewer = people([await this.me(signal)])?.[0]
+    const operator = (brief.work_item_fields ?? []).find((field) => field.key === 'current_status_operator')
+    const current = brief.work_item_current_node ?? []
+    const assignees = operator ? people(operator.value) : current.length && current.every((node) => Array.isArray(node.owners)) ? people(current.flatMap((node) => node.owners ?? [])) : undefined
+    const type = attribute.work_item_type
+    const facts = { ...(viewer ? { viewer } : {}), ...(assignees ? { assignees } : {}), ...(type?.key ? { type: { id: type.key, name: type.name || type.key } } : {}), scope: { id: attribute.owned_project?.simple_name || space.simpleName, name: attribute.owned_project?.name || attribute.owned_project?.simple_name || space.simpleName } }
     const nodes = (brief.work_item_current_node ?? []).map((node) => node.name ?? '').filter(Boolean)
     const nodeFlow = attribute.pattern ? /node/i.test(attribute.pattern) : nodes.length > 0
-    const moves = nodeFlow ? await this.nodeMoves(project, id, nodes, signal) : await this.stateMoves(project, id, attribute, signal)
-    return { status: statusOf(brief), moves: moves.slice(0, MAX_OPTIONS) }
+    const moves = nodeFlow ? await this.nodeMoves(project, id, nodes, current, viewer?.id, signal) : await this.stateMoves(project, id, attribute, viewer?.id, signal)
+    return { status: statusOf(brief), facts: { ...facts, ...(attribute.work_item_status?.key ? { statusId: attribute.work_item_status.key } : {}) }, moves: moves.slice(0, MAX_OPTIONS) }
   }
 
-  private async stateMoves(project: string, id: string, attribute: Brief['work_item_attribute'], signal: AbortSignal): Promise<Move[]> {
+  private async stateMoves(project: string, id: string, attribute: Brief['work_item_attribute'], user: string | undefined, signal: AbortSignal): Promise<Move[]> {
     const type = attribute.work_item_type?.key
     if (!type) throw new SourceError('request-failed', '飞书项目没有返回工作项类型')
-    const user = (await this.me(signal)).user_key
     if (!user) throw new SourceError('request-failed', '飞书项目没有返回当前用户的 user_key')
     const reply = await this.mcp.call('get_transitable_states', { project_key: project, work_item_id: id, work_item_type: type, user_key: user }, signal)
     const current = attribute.work_item_status
@@ -159,10 +169,13 @@ export class MeegleClient {
     })
   }
 
-  private async nodeMoves(project: string, id: string, names: readonly string[], signal: AbortSignal): Promise<Move[]> {
+  private async nodeMoves(project: string, id: string, names: readonly string[], current: NonNullable<Brief['work_item_current_node']>, viewer: string | undefined, signal: AbortSignal): Promise<Move[]> {
     const reply = await this.mcp.call('get_node_detail', { project_key: project, work_item_id: id, node_id_list: [...names], need_sub_task: false, page_num: 1 }, signal)
     const seen = new Set<string>()
     return currentNodes(reply, names).flatMap((node) => {
+      const matching = current.filter((active) => active.name === node.name)
+      const owners = matching.length === 1 ? people(matching[0]?.owners) : undefined
+      if (!viewer || owners?.length !== 1 || owners[0]?.id !== viewer) return []
       const option = `node:${node.node}`
       if (seen.has(option) || option.length > 500) return []
       seen.add(option)
@@ -195,7 +208,7 @@ export class MeegleClient {
         found.push({
           key: item.id, title: item.name.slice(0, MAX_ISSUE_TITLE_LENGTH), url: itemUrl(space, info.route, item.id),
           status: (item.status ?? '未知').slice(0, 100), statusCategory: 'unknown',
-          type: info.name.slice(0, 100), priority: item.priority?.slice(0, 100) ?? null, updatedAt: day(item.updatedOn)
+          type: info.name.slice(0, 100), typeId: type, scope: { id: space.simpleName, name: space.simpleName }, priority: item.priority?.slice(0, 100) ?? null, updatedAt: day(item.updatedOn)
         })
       }
     }
@@ -214,7 +227,7 @@ export class MeegleClient {
     const issue: SourceIssue = {
       key: id, title: title.slice(0, MAX_ISSUE_TITLE_LENGTH), url: itemUrl(project, type?.api_name || type?.key || 'story', id),
       status, statusCategory,
-      type: (type?.name || type?.key || '工作项').slice(0, 100), priority: priority?.slice(0, 100) ?? null,
+      type: (type?.name || type?.key || '工作项').slice(0, 100), ...(type?.key ? { typeId: type.key } : {}), scope: { id: attribute.owned_project?.simple_name || space.simpleName, name: attribute.owned_project?.name || attribute.owned_project?.simple_name || space.simpleName }, priority: priority?.slice(0, 100) ?? null,
       updatedAt: time(attribute.update_time)
     }
     const people = [
@@ -224,16 +237,18 @@ export class MeegleClient {
     const nodes = (brief.work_item_current_node ?? []).map((node) => node.name).filter(Boolean)
     const others = [...fields.values()].filter((field) => !SHOWN.has(field.key)).map((field) => [field.name || field.key, plain(field.value).slice(0, 500)]).filter(([, value]) => value)
     const description = clean(plain(fields.get('description')?.value))
+    const comments = await this.comments(project, id, signal, type?.api_name || type?.key || 'story', projectKey(attribute, space))
     const text = [
       `# ${title}`,
       [`状态：${status}`, `类型：${issue.type}`, ...(priority ? [`优先级：${priority}`] : []), ...(nodes.length ? [`当前节点：${nodes.join('、')}`] : []),
         ...people.map(([role, names]) => `${role}：${names}`),
+        `所属项目：${attribute.owned_project?.name || attribute.owned_project?.simple_name || space.simpleName}`,
         ...(attribute.create_time ? [`创建时间：${attribute.create_time}`] : []), ...(attribute.update_time ? [`更新时间：${attribute.update_time}`] : [])].join('\n'),
       '## 描述', description || '（无）',
       ...(others.length ? ['## 字段', others.map(([name, value]) => `- ${name}：${value}`).join('\n')] : []),
-      await this.comments(project, id, signal)
+      comments.markdown
     ].join('\n\n')
-    return { ...issue, markdown: text.slice(0, MAX_SNAPSHOT_LENGTH) }
+    return { ...issue, markdown: text.slice(0, MAX_SNAPSHOT_LENGTH), ...(comments.state ? { commentState: comments.state } : {}) }
   }
 
   private async types(space: Space, signal: AbortSignal): Promise<Map<string, { name: string, route: string }>> {
@@ -290,16 +305,68 @@ export class MeegleClient {
     return merged
   }
 
-  // Comments add to the snapshot but never decide it: a failure leaves a note instead.
-  private async comments(space: Space, id: string, signal: AbortSignal): Promise<string> {
+  private async nativeComments(space: Space, id: string, signal: AbortSignal): Promise<z.infer<typeof Comment>[]> {
+    const found: z.infer<typeof Comment>[] = []
+    const seen = new Set<string>()
+    const ids = new Set<string>()
+    for (let page = 1; page <= 100; page++) {
+      const reply = parse(Comments, await this.mcp.call('list_workitem_comments', { project_key: space.simpleName, work_item_id: id, page_num: page }, signal), '评论')
+      const items = reply.comments ?? reply.list ?? reply.items ?? []
+      if (!items.length) {
+        if (reply.pagination?.has_more ?? reply.has_more) throw new SourceError('request-failed', '飞书项目的评论分页为空但尚未结束')
+        return found
+      }
+      const signature = JSON.stringify(items.map((comment) => [comment.id, comment.created_at, comment.content]))
+      if (seen.has(signature)) throw new SourceError('request-failed', '飞书项目的评论分页重复')
+      seen.add(signature)
+      for (const item of items) {
+        if (item.id === undefined) continue
+        const key = String(item.id)
+        if (ids.has(key)) throw new SourceError('request-failed', '飞书项目的评论分页重叠，请重试')
+        ids.add(key)
+      }
+      found.push(...items)
+      if ((reply.pagination?.has_more ?? reply.has_more) === false || (reply.total !== undefined && found.length >= reply.total)) return found
+      // Legacy snapshots can lack IDs; they cannot establish an incremental checkpoint.
+      if (items.some((comment) => comment.id === undefined)) return found
+    }
+    throw new SourceError('request-failed', '飞书项目的评论页数超过限制，未推进同步位置')
+  }
+
+  private structuredComments(space: Space, id: string, items: z.infer<typeof Comment>[], route = 'story'): SourceComment[] {
+    const timestamp = (value: string | number | null | undefined) => {
+      const numeric = value === undefined || value === null || value === '' ? NaN : Number(value)
+      const result = Number.isFinite(numeric) ? (numeric < 100_000_000_000 ? numeric * 1000 : numeric) : Date.parse(String(value))
+      if (!Number.isSafeInteger(result) || result < 0) throw new SourceError('request-failed', '评论缺少有效的创建时间，未推进同步位置')
+      return result
+    }
+    return items.map((comment) => {
+      if (comment.id === undefined || !String(comment.id).trim()) throw new SourceError('request-failed', '评论缺少稳定编号，未推进同步位置')
+      const markdown = commentMarkdown(comment.content ?? '')
+      return SourceComment.parse({ id: String(comment.id), author: plain(comment.creator).slice(0, 500), createdAt: timestamp(comment.created_at), updatedAt: comment.updated_at == null ? null : timestamp(comment.updated_at),
+        url: itemUrl(space, route, id), markdown: markdown.slice(0, 50_000), truncated: markdown.length > 50_000 })
+    })
+  }
+
+  async commentChanges(space: Space, id: string, signal: AbortSignal, options: SourceCommentOptions): Promise<SourceCommentPage> {
+    const brief = await this.brief(space, id, signal, false)
+    const project = { ...space, simpleName: projectKey(brief.work_item_attribute, space) }
+    const attribute = brief.work_item_attribute
+    const urlSpace = { ...space, simpleName: attribute.owned_project?.simple_name || space.simpleName }
+    const comments = this.structuredComments(urlSpace, id, await this.nativeComments(project, id, signal), attribute.work_item_type?.api_name || attribute.work_item_type?.key || 'story')
+    return commentPage(comments, options)
+  }
+
+  // Comment errors leave the issue readable, but never manufacture a checkpoint.
+  private async comments(space: Space, id: string, signal: AbortSignal, route: string, project: string) {
     try {
-      const reply = parse(Comments, await this.mcp.call('list_workitem_comments', { project_key: space.simpleName, work_item_id: id, page_num: 1 }, signal), '评论')
-      const comments = reply.comments ?? reply.list ?? reply.items ?? []
-      if (!comments.length) return ''
-      return ['## 最近评论', ...comments.slice(0, 20).map((comment) => `### ${plain(comment.creator) || '未知用户'} · ${comment.created_at ?? ''}\n\n${clean(comment.content ?? '')}`)].join('\n\n')
+      const items = await this.nativeComments({ ...space, simpleName: project }, id, signal)
+      const markdown = items.length ? ['## 最近评论', ...items.slice(0, 20).map((comment) => `### ${plain(comment.creator) || '未知用户'} · ${comment.created_at ?? ''}\n\n${clean(comment.content ?? '')}`)].join('\n\n') : ''
+      try { return { markdown, state: commentState(this.structuredComments(space, id, items, route)) } }
+      catch { return { markdown, state: undefined } }
     } catch (failure) {
       if (signal.aborted) throw failure
-      return '## 最近评论\n\n（评论未能获取）'
+      return { markdown: '## 最近评论\n\n（评论未能获取）', state: undefined }
     }
   }
 }

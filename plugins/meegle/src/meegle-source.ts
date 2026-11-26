@@ -64,6 +64,10 @@ export function meegleSource(connect = (host: string, key: string) => new Meegle
       const { space, client: meegle } = client(settings, credential)
       return meegle.issue(space, itemId(key), signal)
     },
+    async comments(settings, credential, key, signal, options) {
+      const { space, client: meegle } = client(settings, credential)
+      return meegle.commentChanges(space, itemId(key), signal, options)
+    },
     async transitions(settings, credential, key, signal) {
       const { space, client: meegle } = client(settings, credential)
       return meegle.transitions(space, itemId(key), signal)

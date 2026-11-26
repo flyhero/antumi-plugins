@@ -4,11 +4,11 @@
 
 ## 1. 目标与范围
 
-**做**：把一个 Meegle 空间里的工作项同步进 Antumi 的收件箱，导入成任务，拉取详情（标题、状态、优先级、负责人、描述、最近评论）。配合 Antumi 已有的「新问题自动排查」，工作项一进入查询结果，就自动开排查会话。
+**做**：把一个 Meegle 空间里的工作项同步进 Antumi 的收件箱，导入成任务，拉取详情（标题、状态、优先级、负责人、描述、最近评论）。配合 Antumi 已有的「事项自动化」，工作项一进入查询结果，就自动开排查会话。
 
 **不做（v1）**：
 - 写回 Meegle：v1 不做；0.2.0 起支持流转状态、完成节点和发评论，见第 11 节。
-- 评论增量同步（`commentSync`）和图片下载：等真实空间确认返回格式后再做（见第 9 节）。
+- 图片下载尚未实现；评论增量同步已实现，返回格式仍需真实空间确认（见第 12 节）。
 - 私有部署的自定义域名：只接受三个官方域名，Token 不会被发到任意地址。
 - Lark 文档、知识库、多维表格：它们走 Lark 开放平台，和 Meegle 是两套体系。他自己用的智能体可以配 Lark 官方的 `@larksuiteoapi/lark-mcp`；群里 @ 的机器人要读这些内容，得在 core 加工具并设计好按提问人的权限限制，另开 issue 讨论。
 
@@ -152,7 +152,7 @@
    | `updatedAt` | 那一天 0 点的毫秒数（精确到天） |
    | `url` | 按 3.4 节的格式拼 |
 
-4. 「开发确认后自动进 Antumi」的做法：筛选条件写 ``array_contains(`current_status_operator`, current_login_user())``（当前负责人是我）。工作项在 Meegle 里流转到开发节点、负责人变成他之后，下一轮同步就会出现在结果里，「新问题自动排查」会给它开会话。这一步不需要在插件里写状态名。
+4. 「开发确认后自动进 Antumi」的做法：筛选条件写 ``array_contains(`current_status_operator`, current_login_user())``（当前负责人是我）。工作项在 Meegle 里流转到开发节点、负责人变成他之后，下一轮同步就会出现在结果里，「事项自动化」会给它开会话。这一步不需要在插件里写状态名。
 
 不是每个空间都有 `archiving_status`：0.1.0 把它放进固定的列和默认条件，在一个有 57 个字段的 Meegle 空间里报 `attribute not found (3003) … label:archiving_status`（2026-11-23，issue #11），而且只要它在 `SELECT` 里，用户怎么改条件都失败。0.1.1 起固定列只留每个工作项都有的 `work_item_id`、`name`、`work_item_status`、`updated_at`；`priority` 是可选列，服务端说没有这个字段就去掉重查。归档与否不再判断，要排除归档由用户在条件里写空间支持的字段。保存过的 0.1.0 默认条件按新默认值读取。
 
@@ -243,3 +243,13 @@
 | `project_key` 用 `owned_project.key` | 写工具接受真正的 key（读工具实测接受 simple_name） |
 | 只读 Token 写入时的错误 | `NoPermission` 一类错误码或 HTTP 403 |
 
+
+## 12. 事项自动化适配（未发布）
+
+升级 SDK 0.7.0，manifest 声明 commentSync 和 story / issue 的 writebackTypes。list/fetch 返回 typeId 与一致的空间 scope；详情保留所属项目名称，供中枢选择已登记代码仓库。transitions 返回 viewer、assignees、type、scope、statusId，不由插件代替 core 判断归属。
+
+归属读取完整字段分页，只信带稳定用户 ID 的 current_status_operator；缺失时可用当前节点的 owners，任一身份缺失都不部分采纳。节点操作只列出当前账号独自负责的进行中节点，transition 再读取一次详情和节点，不允许使用旧动作推进改派后的节点。
+
+comments 逐页读取直到明确结束或空页；没有结束元数据时重复页视为错误，超过 100 页也失败，不发布不完整的同步位置。SDK commentPage 处理 100 条输出分页及同一时间多条评论。fetch 可在评论失败时保留原文，且不伪造 commentState。
+
+页面使用宿主的连接折叠、组件选择器、按类型规则和紧凑额度行，不新增单独页面。空间地址与 Token 隔离、MQL 校验及写请求不盲目重试的规则保持。缺少真实空间的情况下，不声称已经实测状态流转、节点完成或评论外发。
