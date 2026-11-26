@@ -1,6 +1,6 @@
 # 更新日志
 
-## 1.4.0（未发布）
+## 1.4.0
 
 - 按规则回写只写分配给你的 Issue，有多位处理人时只发评论；Pull Request 默认不回写。要配合更新后的 Antumi 才生效。
 - 「提交验收」不再提供关闭 Issue 的选项：在 Pull Request 里写 Fixes #n，合并时由 GitHub 关闭。
