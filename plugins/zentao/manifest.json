@@ -1,6 +1,6 @@
 {
   "id": "antumi.zentao",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "engines": { "antumi": ">=0.15.11 <1.0.0" },
   "contributes": {
     "sources": [{
