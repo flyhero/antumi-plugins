@@ -21,6 +21,6 @@
     "fflate": "0.8.2",
     "typescript": "7.0.2",
     "vitest": "5.0.1",
-    "@antumi/plugin-sdk": "file:vendor/antumi-plugin-sdk-0.7.0.tgz"
+    "@antumi/plugin-sdk": "file:vendor/antumi-plugin-sdk-0.7.1.tgz"
   }
 }
